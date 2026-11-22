@@ -1,0 +1,316 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Global Primitives ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser()
+        && request.auth.token.email == 'rekarkurd1111@gmail.com';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPlayerCode(code) {
+      return code is string && code.size() == 8 && code.matches('^RK[0-9A-Z]{6}$');
+    }
+
+    // --- Validation Blueprints (Anti-Update-Gap) ---
+    function isValidPublicPlayer(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'score',
+          'bestMass', 'coins', 'dna', 'online', 'currentRoom', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'score',
+          'bestMass', 'coins', 'dna', 'online', 'currentRoom', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && isValidPlayerCode(data.playerCode)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24
+        && data.skinId is string && data.skinId.size() >= 1 && data.skinId.size() <= 32
+        && data.level is number && data.level >= 1 && data.level <= 9999
+        && data.score is number && data.score >= 0 && data.score <= 1000000000
+        && data.bestMass is number && data.bestMass >= 0 && data.bestMass <= 10000000
+        && data.coins is number && data.coins >= 0 && data.coins <= 1000000000
+        && data.dna is number && data.dna >= 0 && data.dna <= 1000000000
+        && data.online is bool
+        && data.currentRoom is string && data.currentRoom.size() <= 24
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlayerCodeLookup(data, code) {
+      return data.keys().hasAll([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'bestMass', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'bestMass', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && isValidPlayerCode(code)
+        && data.playerCode == code
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24
+        && data.skinId is string && data.skinId.size() >= 1 && data.skinId.size() <= 32
+        && data.level is number && data.level >= 1 && data.level <= 9999
+        && data.bestMass is number && data.bestMass >= 0 && data.bestMass <= 10000000
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateUser(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'xp', 'unlockedSkins', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'xp', 'unlockedSkins', 'updatedAt'])
+        && data.uid == uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.xp is number && data.xp >= 0 && data.xp <= 1000000000
+        && data.unlockedSkins is list
+        && data.unlockedSkins.size() >= 1 && data.unlockedSkins.size() <= 50
+        && data.unlockedSkins[0] is string
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendEntry(data, uid, friendUid) {
+      return data.keys().hasAll([
+          'ownerUid', 'friendUid', 'playerCode', 'displayName', 'skinId', 'level', 'addedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerUid', 'friendUid', 'playerCode', 'displayName', 'skinId', 'level', 'addedAt'
+        ])
+        && data.ownerUid == uid
+        && data.friendUid == friendUid
+        && uid != friendUid
+        && isValidPlayerCode(data.playerCode)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24
+        && data.skinId is string && data.skinId.size() >= 1 && data.skinId.size() <= 32
+        && data.level is number && data.level >= 1 && data.level <= 9999
+        && data.addedAt is timestamp;
+    }
+
+    function isValidCurrencyGrant(data) {
+      return data.keys().hasAll([
+          'targetUid', 'targetCode', 'coins', 'dna', 'claimed', 'grantedByUid', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'targetUid', 'targetCode', 'coins', 'dna', 'claimed', 'grantedByUid', 'createdAt', 'claimedAt'
+        ])
+        && isValidId(data.targetUid)
+        && isValidPlayerCode(data.targetCode)
+        && data.coins is number && data.coins >= 0 && data.coins <= 10000000
+        && data.dna is number && data.dna >= 0 && data.dna <= 10000000
+        && (data.coins > 0 || data.dna > 0)
+        && data.claimed is bool
+        && isValidId(data.grantedByUid)
+        && data.createdAt is timestamp
+        && (!('claimedAt' in data) || data.claimedAt is timestamp);
+    }
+
+    function isValidWeeklyTopEntry(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'weekKey',
+          'bestMass', 'weeklyScore', 'cellsEaten', 'matchesCount', 'isPublic',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'playerCode', 'displayName', 'skinId', 'level', 'weekKey',
+          'bestMass', 'weeklyScore', 'cellsEaten', 'matchesCount', 'isPublic',
+          'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && isValidPlayerCode(data.playerCode)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24
+        && data.skinId is string && data.skinId.size() >= 1 && data.skinId.size() <= 32
+        && data.level is number && data.level >= 1 && data.level <= 9999
+        && data.weekKey is string && data.weekKey.size() == 8 && data.weekKey.matches('^20[0-9]{2}-W[0-9]{2}$')
+        && data.bestMass is number && data.bestMass >= 0 && data.bestMass <= 10000000
+        && data.weeklyScore is number && data.weeklyScore >= 0 && data.weeklyScore <= 1000000000
+        && data.cellsEaten is number && data.cellsEaten >= 0 && data.cellsEaten <= 1000000
+        && data.matchesCount is number && data.matchesCount >= 1 && data.matchesCount <= 1000000
+        && data.isPublic == true
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // Public Player Profiles (no PII)
+    match /players/{uid} {
+      allow get: if isSignedIn() && isValidId(uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow create: if isOwner(uid)
+        && isValidId(uid)
+        && isValidPublicPlayer(incoming(), uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(uid)
+        && isValidPublicPlayer(incoming(), uid)
+        && (isAdmin() || isOwner(uid))
+        && incoming().uid == existing().uid
+        && incoming().playerCode == existing().playerCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'skinId', 'level', 'score', 'bestMass',
+          'coins', 'dna', 'online', 'currentRoom', 'updatedAt'
+        ]);
+    }
+
+    // Exact PlayerCode Lookup Table (for Find Friends by ID)
+    match /playerCodes/{playerCode} {
+      allow get: if isSignedIn() && isValidPlayerCode(playerCode);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow create: if isVerifiedUser()
+        && isValidPlayerCode(playerCode)
+        && isValidPlayerCodeLookup(incoming(), playerCode)
+        && incoming().uid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/players/$(request.auth.uid));
+
+      allow update: if isValidPlayerCode(playerCode)
+        && isValidPlayerCodeLookup(incoming(), playerCode)
+        && (isAdmin() || (isVerifiedUser() && existing().uid == request.auth.uid))
+        && incoming().uid == existing().uid
+        && incoming().playerCode == existing().playerCode
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'skinId', 'level', 'bestMass', 'updatedAt'
+        ]);
+    }
+
+    // Private User PII & Inventory
+    match /usersPrivate/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+
+      allow create: if isOwner(uid)
+        && isValidId(uid)
+        && isValidPrivateUser(incoming(), uid)
+        && incoming().email == request.auth.token.email
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(uid)
+        && isValidPrivateUser(incoming(), uid)
+        && (isOwner(uid) || isAdmin())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'email', 'xp', 'unlockedSkins', 'updatedAt'
+        ]);
+    }
+
+    // Friends Subcollection (Pillar 1)
+    match /friendships/{uid}/list/{friendUid} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(friendUid);
+      allow list: if isOwner(uid) && resource.data.ownerUid == request.auth.uid;
+
+      allow create: if isOwner(uid)
+        && isValidId(uid)
+        && isValidId(friendUid)
+        && isValidFriendEntry(incoming(), uid, friendUid)
+        && incoming().addedAt == request.time
+        && exists(/databases/$(database)/documents/players/$(friendUid));
+
+      allow update: if isOwner(uid)
+        && isValidId(uid)
+        && isValidId(friendUid)
+        && isValidFriendEntry(incoming(), uid, friendUid)
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().friendUid == existing().friendUid
+        && incoming().addedAt == existing().addedAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'skinId', 'level'
+        ]);
+
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(friendUid);
+    }
+
+    // Owner-Only Currency Grants (Gift Coins/DNA to any player)
+    match /currencyGrants/{grantId} {
+      allow get: if isValidId(grantId)
+        && (isAdmin() || (isVerifiedUser() && existing().targetUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.targetUid == request.auth.uid);
+
+      allow create: if isAdmin()
+        && isValidId(grantId)
+        && isValidCurrencyGrant(incoming())
+        && incoming().grantedByUid == request.auth.uid
+        && incoming().claimed == false
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/players/$(incoming().targetUid));
+
+      allow update: if isValidId(grantId)
+        && isValidCurrencyGrant(incoming())
+        && (
+          isAdmin()
+          || (
+            isVerifiedUser()
+            && existing().targetUid == request.auth.uid
+            && existing().claimed == false
+            && incoming().claimed == true
+            && incoming().targetUid == existing().targetUid
+            && incoming().targetCode == existing().targetCode
+            && incoming().coins == existing().coins
+            && incoming().dna == existing().dna
+            && incoming().grantedByUid == existing().grantedByUid
+            && incoming().createdAt == existing().createdAt
+            && incoming().claimedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['claimed', 'claimedAt'])
+          )
+        );
+    }
+
+    // Weekly World Top Leaderboard (public, zero PII, keyed as {weekKey}_{uid})
+    match /weeklyTop/{entryId} {
+      allow get: if isValidId(entryId) && existing().isPublic == true;
+      allow list: if resource.data.isPublic == true && resource.data.weekKey is string;
+
+      allow create: if isVerifiedUser()
+        && isValidId(entryId)
+        && isValidWeeklyTopEntry(incoming(), request.auth.uid)
+        && entryId == (incoming().weekKey + '_' + request.auth.uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/players/$(request.auth.uid));
+
+      allow update: if isValidId(entryId)
+        && isValidWeeklyTopEntry(incoming(), existing().uid)
+        && (isAdmin() || isOwner(existing().uid))
+        && incoming().uid == existing().uid
+        && incoming().playerCode == existing().playerCode
+        && incoming().weekKey == existing().weekKey
+        && incoming().isPublic == true
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'skinId', 'level', 'bestMass', 'weeklyScore',
+          'cellsEaten', 'matchesCount', 'updatedAt'
+        ]);
+    }
+  }
+}

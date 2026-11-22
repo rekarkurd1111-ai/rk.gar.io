@@ -1,0 +1,6 @@
+{
+  "name": "Xane.io",
+  "description": "یاری ئارێنای خانەکان وەک Agar.io — گەورە ببە، دابەش ببە، و ببە بە پاشای ئارێناکە.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

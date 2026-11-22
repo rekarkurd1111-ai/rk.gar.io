@@ -1,0 +1,369 @@
+{
+  "entities": {
+    "PublicPlayer": {
+      "title": "PublicPlayer",
+      "description": "Public directory profile and unique Player ID for an Rk.gar.io player (no PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^RK[0-9A-Z]{6}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "skinId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "level": {
+          "type": "number"
+        },
+        "score": {
+          "type": "number"
+        },
+        "bestMass": {
+          "type": "number"
+        },
+        "coins": {
+          "type": "number"
+        },
+        "dna": {
+          "type": "number"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "currentRoom": {
+          "type": "string",
+          "maxLength": 24
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "playerCode",
+        "displayName",
+        "skinId",
+        "level",
+        "score",
+        "bestMass",
+        "coins",
+        "dna",
+        "online",
+        "currentRoom",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PlayerCodeLookup": {
+      "title": "PlayerCodeLookup",
+      "description": "Exact ID lookup record keyed by playerCode (RKXXXXXX) for finding friends.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^RK[0-9A-Z]{6}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "skinId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "level": {
+          "type": "number"
+        },
+        "bestMass": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "playerCode",
+        "displayName",
+        "skinId",
+        "level",
+        "bestMass",
+        "updatedAt"
+      ]
+    },
+    "PrivateUserProfile": {
+      "title": "PrivateUserProfile",
+      "description": "Private user PII (email) and inventory strictly accessible only to the user and Admin.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "xp": {
+          "type": "number"
+        },
+        "unlockedSkins": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "xp",
+        "unlockedSkins",
+        "updatedAt"
+      ]
+    },
+    "FriendEntry": {
+      "title": "FriendEntry",
+      "description": "Saved friend entry under a user's friendship subcollection.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "friendUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^RK[0-9A-Z]{6}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "skinId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "level": {
+          "type": "number"
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerUid",
+        "friendUid",
+        "playerCode",
+        "displayName",
+        "skinId",
+        "level",
+        "addedAt"
+      ]
+    },
+    "CurrencyGrant": {
+      "title": "CurrencyGrant",
+      "description": "Owner-only Coins/DNA gift grant to a target player.",
+      "type": "object",
+      "properties": {
+        "targetUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^RK[0-9A-Z]{6}$"
+        },
+        "coins": {
+          "type": "number"
+        },
+        "dna": {
+          "type": "number"
+        },
+        "claimed": {
+          "type": "boolean"
+        },
+        "grantedByUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "claimedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "targetUid",
+        "targetCode",
+        "coins",
+        "dna",
+        "claimed",
+        "grantedByUid",
+        "createdAt"
+      ]
+    },
+    "WeeklyTopEntry": {
+      "title": "WeeklyTopEntry",
+      "description": "Public weekly leaderboard record per verified player per ISO week (no PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^RK[0-9A-Z]{6}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "skinId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "level": {
+          "type": "number"
+        },
+        "weekKey": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^20[0-9]{2}-W[0-9]{2}$"
+        },
+        "bestMass": {
+          "type": "number"
+        },
+        "weeklyScore": {
+          "type": "number"
+        },
+        "cellsEaten": {
+          "type": "number"
+        },
+        "matchesCount": {
+          "type": "number"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "playerCode",
+        "displayName",
+        "skinId",
+        "level",
+        "weekKey",
+        "bestMass",
+        "weeklyScore",
+        "cellsEaten",
+        "matchesCount",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{uid}": {
+      "schema": {
+        "$ref": "#/entities/PublicPlayer"
+      },
+      "description": "Public player profile and ID directory."
+    },
+    "/playerCodes/{playerCode}": {
+      "schema": {
+        "$ref": "#/entities/PlayerCodeLookup"
+      },
+      "description": "Exact playerCode lookup table for friend discovery."
+    },
+    "/usersPrivate/{uid}": {
+      "schema": {
+        "$ref": "#/entities/PrivateUserProfile"
+      },
+      "description": "Private PII and progression data isolated to the owning user."
+    },
+    "/friendships/{uid}/list/{friendUid}": {
+      "schema": {
+        "$ref": "#/entities/FriendEntry"
+      },
+      "description": "Subcollection of friends owned by {uid}."
+    },
+    "/currencyGrants/{grantId}": {
+      "schema": {
+        "$ref": "#/entities/CurrencyGrant"
+      },
+      "description": "Admin-issued Coins/DNA grants claimable by targetUid."
+    },
+    "/weeklyTop/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/WeeklyTopEntry"
+      },
+      "description": "Public weekly World Top leaderboard keyed by {weekKey}_{uid}."
+    }
+  }
+}
