@@ -10,6 +10,7 @@ import {
   Swords,
   Trophy,
   X,
+  AlertCircle,
 } from 'lucide-react';
 import {
   formatPlayerCodeDisplay,
@@ -27,9 +28,13 @@ interface WorldTopModalProps {
   loading: boolean;
   firebaseUser: User | null;
   authLoading: boolean;
+  authError: string | null;
+  showRedirectFallback: boolean;
   t: Translations;
   onRefresh: () => void;
   onSignInGoogle: () => void;
+  onSignInGoogleRedirect: () => void;
+  onClearAuthError: () => void;
 }
 
 type SortMode = 'mass' | 'score';
@@ -41,9 +46,13 @@ export function WorldTopModal({
   loading,
   firebaseUser,
   authLoading,
+  authError,
+  showRedirectFallback,
   t,
   onRefresh,
   onSignInGoogle,
+  onSignInGoogleRedirect,
+  onClearAuthError,
 }: WorldTopModalProps) {
   const [sortMode, setSortMode] = useState<SortMode>('mass');
 
@@ -156,19 +165,43 @@ export function WorldTopModal({
         <div className="flex-1 space-y-3 overflow-y-auto overscroll-contain touch-pan-y px-4 py-3.5 sm:px-6">
           {/* Guest Sign-In Reminder */}
           {!firebaseUser && (
-            <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl border border-sky-200/80 bg-sky-50/85 p-3 dark:border-sky-800/60 dark:bg-sky-950/40">
-              <p className="min-w-[180px] flex-1 text-xs font-semibold text-sky-900 dark:text-sky-100">
-                {t.weeklySignInHint}
-              </p>
-              <button
-                type="button"
-                disabled={authLoading}
-                onClick={onSignInGoogle}
-                className="flex min-h-[38px] items-center gap-1.5 rounded-xl bg-sky-600 px-3.5 py-1.5 text-xs font-extrabold text-white shadow-sm transition-colors hover:bg-sky-700 disabled:opacity-50 whitespace-nowrap"
-              >
-                <LogIn className="h-3.5 w-3.5" />
-                <span>{t.signInGoogleBtn}</span>
-              </button>
+            <div className="space-y-2 rounded-2xl border border-sky-200/80 bg-sky-50/85 p-3 dark:border-sky-800/60 dark:bg-sky-950/40">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <p className="min-w-[180px] flex-1 text-xs font-semibold text-sky-900 dark:text-sky-100">
+                  {t.weeklySignInHint}
+                </p>
+                <button
+                  type="button"
+                  disabled={authLoading}
+                  onClick={() => {
+                    onClearAuthError();
+                    onSignInGoogle();
+                  }}
+                  className="flex min-h-[38px] items-center gap-1.5 rounded-xl bg-sky-600 px-3.5 py-1.5 text-xs font-extrabold text-white shadow-sm transition-colors hover:bg-sky-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  <span>{t.signInGoogleBtn}</span>
+                </button>
+              </div>
+              {authError && (
+                <div className="space-y-2 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-200">
+                  <div className="flex items-start gap-1.5">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{authError}</span>
+                  </div>
+                  {showRedirectFallback && (
+                    <button
+                      type="button"
+                      disabled={authLoading}
+                      onClick={onSignInGoogleRedirect}
+                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+                    >
+                      <LogIn className="h-3.5 w-3.5" />
+                      <span>{t.tryRedirectSignInBtn}</span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

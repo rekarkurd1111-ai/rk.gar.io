@@ -9,7 +9,29 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.addScope('email');
+googleProvider.addScope('profile');
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+export function isValidEmailFormat(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
+export function createGoogleProvider(emailHint?: string): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.addScope('email');
+  provider.addScope('profile');
+  const trimmed = emailHint?.trim();
+  if (trimmed && isValidEmailFormat(trimmed)) {
+    provider.setCustomParameters({
+      prompt: 'select_account',
+      login_hint: trimmed,
+    });
+  } else {
+    provider.setCustomParameters({ prompt: 'select_account' });
+  }
+  return provider;
+}
 
 export function isVerifiedOwnerUser(user: User | null | undefined): boolean {
   if (!user || !user.email || !user.emailVerified) return false;

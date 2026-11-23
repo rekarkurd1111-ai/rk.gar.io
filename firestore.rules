@@ -29,7 +29,8 @@ service cloud.firestore {
 
     function isAdmin() {
       return isVerifiedUser()
-        && request.auth.token.email == 'rekarkurd1111@gmail.com';
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'rekarkurd1111@gmail.com';
     }
 
     function isValidId(id) {
@@ -211,7 +212,7 @@ service cloud.firestore {
       allow create: if isOwner(uid)
         && isValidId(uid)
         && isValidPrivateUser(incoming(), uid)
-        && incoming().email == request.auth.token.email
+        && (request.auth.token.email == null || incoming().email.lower() == request.auth.token.email.lower())
         && incoming().updatedAt == request.time;
 
       allow update: if isValidId(uid)
@@ -253,7 +254,7 @@ service cloud.firestore {
     // Owner-Only Currency Grants (Gift Coins/DNA to any player)
     match /currencyGrants/{grantId} {
       allow get: if isValidId(grantId)
-        && (isAdmin() || (isVerifiedUser() && existing().targetUid == request.auth.uid));
+        && (isAdmin() || (isVerifiedUser() && resource != null && existing().targetUid == request.auth.uid));
       allow list: if isAdmin() || (isVerifiedUser() && resource.data.targetUid == request.auth.uid);
 
       allow create: if isAdmin()
@@ -287,7 +288,10 @@ service cloud.firestore {
 
     // Weekly World Top Leaderboard (public, zero PII, keyed as {weekKey}_{uid})
     match /weeklyTop/{entryId} {
-      allow get: if isValidId(entryId) && existing().isPublic == true;
+      allow get: if isValidId(entryId) && (
+        (resource != null && existing().isPublic == true)
+        || (resource == null && isVerifiedUser())
+      );
       allow list: if resource.data.isPublic == true && resource.data.weekKey is string;
 
       allow create: if isVerifiedUser()

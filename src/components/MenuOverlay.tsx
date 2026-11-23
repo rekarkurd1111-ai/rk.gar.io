@@ -28,11 +28,16 @@ import {
   LogOut,
   Mail,
   Gauge,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+  AlertCircle,
+  Megaphone,
 } from 'lucide-react';
 import { formatPlayerCodeDisplay } from '../game/accountService';
 import { Translations } from '../game/i18n';
 import { xpRequiredForLevel } from '../game/progression';
-import { SKINS } from '../game/skins';
+import { getSkinLevel, SKINS } from '../game/skins';
 import {
   AccountModalTab,
   ArenaTheme,
@@ -42,6 +47,7 @@ import {
   HudSnapshot,
   Language,
   MatchRewardSummary,
+  OwnerAnnouncement,
   PlayerProfile,
   PlayType,
   RoomSummary,
@@ -62,8 +68,11 @@ interface MenuOverlayProps {
   lastRewards: MatchRewardSummary | null;
   lastTokensEarned?: number;
   rooms: RoomSummary[];
+  serverStatus: 'connecting' | 'connected' | 'offline';
   connecting: boolean;
   connectionError: string | null;
+  onReconnectServer: () => void;
+  onCancelConnect: () => void;
   passClaimableCount: number;
   eventBadgeCount: number;
   playerCode: string;
@@ -71,13 +80,20 @@ interface MenuOverlayProps {
   firebaseUser: FirebaseUser | null;
   authLoading: boolean;
   authError: string | null;
+  showRedirectFallback: boolean;
+  accountSyncStatus: 'idle' | 'syncing' | 'synced' | 'error';
+  accountSyncError: string | null;
   onSignInGoogle: (emailHint?: string) => void;
+  onSignInGoogleRedirect: (emailHint?: string) => void;
   onSignOut: () => void;
   onClearAuthError: () => void;
+  onRetryAccountSync: () => void;
   kickedNotice: string | null;
   onDismissKickedNotice: () => void;
   grantNotice: string | null;
   onDismissGrantNotice: () => void;
+  announcement: OwnerAnnouncement | null;
+  onDismissAnnouncement: () => void;
   onChangeConfig: (partial: Partial<GameConfig>) => void;
   onToggleLanguage: () => void;
   onOpenShop: (tab?: ShopTab) => void;
@@ -110,8 +126,11 @@ export function MenuOverlay({
   lastRewards,
   lastTokensEarned = 0,
   rooms,
+  serverStatus,
   connecting,
   connectionError,
+  onReconnectServer,
+  onCancelConnect,
   passClaimableCount,
   eventBadgeCount,
   playerCode,
@@ -119,13 +138,20 @@ export function MenuOverlay({
   firebaseUser,
   authLoading,
   authError,
+  showRedirectFallback,
+  accountSyncStatus,
+  accountSyncError,
   onSignInGoogle,
+  onSignInGoogleRedirect,
   onSignOut,
   onClearAuthError,
+  onRetryAccountSync,
   kickedNotice,
   onDismissKickedNotice,
   grantNotice,
   onDismissGrantNotice,
+  announcement,
+  onDismissAnnouncement,
   onChangeConfig,
   onToggleLanguage,
   onOpenShop,
@@ -302,15 +328,39 @@ export function MenuOverlay({
             </div>
           )}
 
+          {connectionError && (
+            <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-rose-300/80 bg-rose-50/95 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/90 dark:text-rose-200">
+              <span>{connectionError}</span>
+              <button
+                type="button"
+                onClick={onReconnectServer}
+                className="flex shrink-0 items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-rose-700"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>{t.reconnectServerBtn}</span>
+              </button>
+            </div>
+          )}
+
           <div className="mt-5 grid grid-cols-2 gap-2.5 sm:flex sm:flex-wrap">
             <button
               type="button"
+              disabled={connecting}
               onClick={onStartGame}
-              className="col-span-2 flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 focus-visible:outline-2 focus-visible:outline-sky-500 whitespace-nowrap"
+              className="col-span-2 flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:opacity-65 focus-visible:outline-2 focus-visible:outline-sky-500 whitespace-nowrap"
             >
-              <RotateCcw className="h-4 w-4" />
-              <span>{t.playAgain}</span>
+              <RotateCcw className={`h-4 w-4 ${connecting ? 'animate-spin' : ''}`} />
+              <span>{connecting ? t.connectingText : t.playAgain}</span>
             </button>
+            {connecting && (
+              <button
+                type="button"
+                onClick={onCancelConnect}
+                className="col-span-2 flex min-h-[40px] items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              >
+                {t.cancelBtn}
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenGamePass}
@@ -374,6 +424,14 @@ export function MenuOverlay({
     kurdistan: t.kurdistanRoomName,
     blitz: t.blitzRoomName,
     merge: t.mergeRoomName,
+    relaxed: t.relaxedRoomName,
+  };
+  const presetRoomIds = new Set(['global', 'kurdistan', 'blitz', 'merge', 'relaxed']);
+  const modeDefaultRoomMap: Record<GameMode, string> = {
+    classic: 'global',
+    blitz: 'blitz',
+    merge: 'merge',
+    relaxed: 'relaxed',
   };
 
   const fpsOptions: { value: TargetFps; desc: string; accent: string }[] = [
@@ -587,6 +645,24 @@ export function MenuOverlay({
               {t.brand}
             </h1>
             <p className="mt-1 flex flex-wrap items-center justify-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 [@media(max-height:520px)]:mt-0.5 [@media(max-height:520px)]:text-[10px]">
+              {config.playType === 'online' && (
+                <span
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    serverStatus === 'connected'
+                      ? 'bg-emerald-500'
+                      : serverStatus === 'connecting'
+                      ? 'animate-pulse bg-amber-500'
+                      : 'bg-rose-500'
+                  }`}
+                  title={`${t.serverStatusLabel}: ${
+                    serverStatus === 'connected'
+                      ? t.serverOnline
+                      : serverStatus === 'connecting'
+                      ? t.serverConnecting
+                      : t.serverOffline
+                  }`}
+                />
+              )}
               <span>{config.playType === 'online' ? `${t.onlineBadge} · ${currentRoomLabel}` : t.playSolo}</span>
               <span aria-hidden="true">·</span>
               <span>{t.modes[config.mode].title}</span>
@@ -605,7 +681,11 @@ export function MenuOverlay({
               title={lang === 'ckb' ? activeSkin?.nameCkb : activeSkin?.nameEn}
               className="relative flex h-13 w-13 shrink-0 items-center justify-center rounded-full border-2 border-white bg-white shadow-md ring-2 ring-sky-500/25 transition-transform hover:scale-105 active:scale-95 dark:border-slate-700 dark:bg-slate-800 dark:ring-sky-400/25 sm:h-14 sm:w-14 [@media(max-height:520px)]:h-11 [@media(max-height:520px)]:w-11"
             >
-              <SkinPreview skinId={config.skinId} size={42} />
+              <SkinPreview
+                skinId={config.skinId}
+                size={46}
+                skinLevel={getSkinLevel(profile.skinLevels, config.skinId)}
+              />
               <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2 border-white bg-emerald-500 text-white shadow dark:border-slate-900 [@media(max-height:520px)]:h-4 [@media(max-height:520px)]:w-4">
                 <Plus className="h-3 w-3 stroke-[3]" />
               </span>
@@ -627,8 +707,16 @@ export function MenuOverlay({
           </div>
 
           {connectionError && (
-            <div className="mt-2.5 w-full rounded-xl border border-rose-300/80 bg-rose-50/95 px-3 py-1.5 text-center text-xs font-semibold text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/90 dark:text-rose-200">
-              {connectionError}
+            <div className="mt-2.5 flex w-full items-center justify-between gap-2 rounded-xl border border-rose-300/80 bg-rose-50/95 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/90 dark:text-rose-200">
+              <span>{connectionError}</span>
+              <button
+                type="button"
+                onClick={onReconnectServer}
+                className="flex shrink-0 items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-rose-700"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>{t.reconnectServerBtn}</span>
+              </button>
             </div>
           )}
 
@@ -660,15 +748,38 @@ export function MenuOverlay({
             </div>
           )}
 
+          {announcement && (
+            <div className="mt-2.5 flex w-full items-center justify-between gap-2 rounded-2xl border border-amber-400/80 bg-amber-100/95 px-3.5 py-2 text-xs font-extrabold text-amber-950 shadow-sm dark:border-amber-500/50 dark:bg-amber-950/70 dark:text-amber-200">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <Megaphone className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span className="truncate">
+                  {t.ownerAnnouncementPrefix} {announcement.text}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={onDismissAnnouncement}
+                aria-label={t.closeBtn}
+                className="rounded-lg p-1 hover:bg-amber-200/60 dark:hover:bg-amber-900"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Primary Play CTA + Secondary Settings & Modes */}
           <div className="mt-3 flex w-full items-stretch gap-2.5 sm:mt-3.5 [@media(max-height:520px)]:mt-2">
             <button
               type="button"
               disabled={connecting}
               onClick={onStartGame}
-              className="flex min-h-[54px] flex-[1.45] items-center justify-center gap-2 rounded-2xl bg-gradient-to-b from-orange-500 to-rose-600 px-4 py-2.5 text-white shadow-lg shadow-orange-500/25 transition-all duration-150 hover:brightness-105 active:scale-[0.98] disabled:opacity-60 sm:min-h-[56px] [@media(max-height:520px)]:min-h-[42px] [@media(max-height:520px)]:rounded-xl"
+              className="flex min-h-[54px] flex-[1.45] items-center justify-center gap-2 rounded-2xl bg-gradient-to-b from-orange-500 to-rose-600 px-4 py-2.5 text-white shadow-lg shadow-orange-500/25 transition-all duration-150 hover:brightness-105 active:scale-[0.98] disabled:opacity-65 sm:min-h-[56px] [@media(max-height:520px)]:min-h-[42px] [@media(max-height:520px)]:rounded-xl"
             >
-              <Play className="h-5 w-5 fill-current [@media(max-height:520px)]:h-4 [@media(max-height:520px)]:w-4" />
+              {connecting ? (
+                <RefreshCw className="h-5 w-5 animate-spin [@media(max-height:520px)]:h-4 [@media(max-height:520px)]:w-4" />
+              ) : (
+                <Play className="h-5 w-5 fill-current [@media(max-height:520px)]:h-4 [@media(max-height:520px)]:w-4" />
+              )}
               <span className="text-sm font-black tracking-tight whitespace-nowrap sm:text-base [@media(max-height:520px)]:text-xs">
                 {connecting
                   ? t.connectingText
@@ -678,16 +789,29 @@ export function MenuOverlay({
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setMoreOpen(true)}
-              className="flex min-h-[54px] flex-1 items-center justify-center gap-1.5 rounded-2xl border border-slate-200/90 bg-white/95 px-3 py-2.5 text-slate-800 shadow-xs transition-colors hover:bg-white active:scale-[0.98] dark:border-slate-700/80 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:bg-slate-800 sm:min-h-[56px] [@media(max-height:520px)]:min-h-[42px] [@media(max-height:520px)]:rounded-xl"
-            >
-              <SlidersHorizontal className="h-4 w-4 text-sky-600 dark:text-sky-400" />
-              <span className="text-xs font-extrabold whitespace-nowrap sm:text-sm [@media(max-height:520px)]:text-xs">
-                {t.moreBtn}
-              </span>
-            </button>
+            {connecting ? (
+              <button
+                type="button"
+                onClick={onCancelConnect}
+                className="flex min-h-[54px] flex-1 items-center justify-center gap-1.5 rounded-2xl border border-slate-200/90 bg-white/95 px-3 py-2.5 text-slate-800 shadow-xs transition-colors hover:bg-white active:scale-[0.98] dark:border-slate-700/80 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:bg-slate-800 sm:min-h-[56px] [@media(max-height:520px)]:min-h-[42px] [@media(max-height:520px)]:rounded-xl"
+              >
+                <X className="h-4 w-4 text-rose-500" />
+                <span className="text-xs font-extrabold whitespace-nowrap sm:text-sm [@media(max-height:520px)]:text-xs">
+                  {t.cancelBtn}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setMoreOpen(true)}
+                className="flex min-h-[54px] flex-1 items-center justify-center gap-1.5 rounded-2xl border border-slate-200/90 bg-white/95 px-3 py-2.5 text-slate-800 shadow-xs transition-colors hover:bg-white active:scale-[0.98] dark:border-slate-700/80 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:bg-slate-800 sm:min-h-[56px] [@media(max-height:520px)]:min-h-[42px] [@media(max-height:520px)]:rounded-xl"
+              >
+                <SlidersHorizontal className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+                <span className="text-xs font-extrabold whitespace-nowrap sm:text-sm [@media(max-height:520px)]:text-xs">
+                  {t.moreBtn}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -822,39 +946,63 @@ export function MenuOverlay({
                 </div>
 
                 {firebaseUser ? (
-                  <div className="flex flex-wrap items-center justify-between gap-2.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                        {t.signedInAsLabel}
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                          {t.signedInAsLabel}
+                        </div>
+                        <div
+                          dir="ltr"
+                          className="truncate text-xs font-extrabold text-slate-900 dark:text-white"
+                        >
+                          {firebaseUser.email || firebaseUser.displayName}
+                        </div>
                       </div>
-                      <div
-                        dir="ltr"
-                        className="truncate text-xs font-extrabold text-slate-900 dark:text-white"
-                      >
-                        {firebaseUser.email}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMoreOpen(false);
+                            onOpenAccount('account');
+                          }}
+                          className="flex min-h-[38px] items-center rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 whitespace-nowrap"
+                        >
+                          {t.accountBtn}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={authLoading}
+                          onClick={onSignOut}
+                          className="flex min-h-[38px] items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-[11px] font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800/70 dark:bg-slate-900 dark:text-rose-400 whitespace-nowrap"
+                        >
+                          <LogOut className="h-3.5 w-3.5" />
+                          <span>{t.signOutBtn}</span>
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMoreOpen(false);
-                          onOpenAccount('account');
-                        }}
-                        className="flex min-h-[38px] items-center rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 whitespace-nowrap"
-                      >
-                        {t.accountBtn}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={authLoading}
-                        onClick={onSignOut}
-                        className="flex min-h-[38px] items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-[11px] font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800/70 dark:bg-slate-900 dark:text-rose-400 whitespace-nowrap"
-                      >
-                        <LogOut className="h-3.5 w-3.5" />
-                        <span>{t.signOutBtn}</span>
-                      </button>
-                    </div>
+
+                    {accountSyncStatus === 'syncing' && (
+                      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-700 dark:text-sky-300">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>{t.accountSyncingText}</span>
+                      </div>
+                    )}
+
+                    {accountSyncStatus === 'error' && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
+                        <span className="min-w-0 flex-1 break-words">
+                          {t.accountSyncErrorText} {accountSyncError}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onRetryAccountSync}
+                          className="shrink-0 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-700"
+                        >
+                          {t.retrySyncBtn}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -886,9 +1034,26 @@ export function MenuOverlay({
                         <span>{t.signInGoogleBtn}</span>
                       </button>
                     </div>
+                    <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                      {t.emailHintOptionalNote}
+                    </p>
                     {authError && (
-                      <div className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-200">
-                        {authError}
+                      <div className="space-y-2 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-[11px] font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-200">
+                        <div className="flex items-start gap-1.5">
+                          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>{authError}</span>
+                        </div>
+                        {showRedirectFallback && (
+                          <button
+                            type="button"
+                            disabled={authLoading}
+                            onClick={() => onSignInGoogleRedirect(settingsEmailInput)}
+                            className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+                          >
+                            <LogIn className="h-3.5 w-3.5" />
+                            <span>{t.tryRedirectSignInBtn}</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -897,8 +1062,41 @@ export function MenuOverlay({
 
               {/* Play Type & Online Rooms Card */}
               <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-3.5 shadow-xs dark:border-slate-800 dark:bg-slate-800/45">
-                <div className="mb-2 flex items-center justify-between text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                <div className="mb-2 flex items-center justify-between gap-2 text-xs font-extrabold text-slate-800 dark:text-slate-200">
                   <span>{t.playTypeLabel}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[10px] font-bold ${
+                        serverStatus === 'connected'
+                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                          : serverStatus === 'connecting'
+                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                          : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      {serverStatus === 'offline' ? (
+                        <WifiOff className="h-3 w-3" />
+                      ) : (
+                        <Wifi className="h-3 w-3" />
+                      )}
+                      <span>
+                        {serverStatus === 'connected'
+                          ? t.serverOnline
+                          : serverStatus === 'connecting'
+                          ? t.serverConnecting
+                          : t.serverOffline}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={onReconnectServer}
+                      title={t.reconnectServerBtn}
+                      aria-label={t.reconnectServerBtn}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600 hover:bg-white dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${serverStatus === 'connecting' ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 p-1 dark:bg-slate-900/70">
                   {playTypes.map((pt) => {
@@ -940,6 +1138,7 @@ export function MenuOverlay({
                             { id: 'kurdistan', mode: 'classic' as GameMode, onlinePlayers: 0 },
                             { id: 'blitz', mode: 'blitz' as GameMode, onlinePlayers: 0 },
                             { id: 'merge', mode: 'merge' as GameMode, onlinePlayers: 0 },
+                            { id: 'relaxed', mode: 'relaxed' as GameMode, onlinePlayers: 0 },
                           ]
                       ).map((room) => {
                         const selected = config.roomId === room.id;
@@ -949,13 +1148,16 @@ export function MenuOverlay({
                             key={room.id}
                             type="button"
                             onClick={() => onChangeConfig({ roomId: room.id, mode: room.mode })}
-                            className={`flex min-h-[40px] items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-bold transition-all whitespace-nowrap ${
+                            className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold transition-all whitespace-nowrap ${
                               selected
                                 ? 'border-sky-500 bg-sky-500/15 text-sky-800 shadow-xs dark:border-sky-400 dark:text-sky-200'
                                 : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300'
                             }`}
                           >
                             <span>{displayName}</span>
+                            <span className="rounded bg-slate-200/75 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                              {t.modes[room.mode].title}
+                            </span>
                             <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
                               · {room.onlinePlayers}
                             </span>
@@ -1013,7 +1215,17 @@ export function MenuOverlay({
                       <button
                         key={m}
                         type="button"
-                        onClick={() => onChangeConfig({ mode: m })}
+                        onClick={() => {
+                          if (config.playType === 'online' && presetRoomIds.has(config.roomId)) {
+                            const nextRoom =
+                              m === 'classic' && config.roomId === 'kurdistan'
+                                ? 'kurdistan'
+                                : modeDefaultRoomMap[m];
+                            onChangeConfig({ mode: m, roomId: nextRoom });
+                          } else {
+                            onChangeConfig({ mode: m });
+                          }
+                        }}
                         className={`flex min-h-[58px] flex-col items-start justify-center rounded-xl border p-2.5 text-start transition-all ${
                           active
                             ? activeCardClass

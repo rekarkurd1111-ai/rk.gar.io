@@ -15,6 +15,8 @@ import {
   UserPlus,
   Users,
   X,
+  RefreshCw,
+  AlertCircle,
 } from 'lucide-react';
 import {
   formatPlayerCodeDisplay,
@@ -42,6 +44,9 @@ interface AccountFriendsModalProps {
   firebaseUser: User | null;
   authLoading: boolean;
   authError: string | null;
+  showRedirectFallback: boolean;
+  accountSyncStatus: 'idle' | 'syncing' | 'synced' | 'error';
+  accountSyncError: string | null;
   playerCode: string;
   friends: FriendRecord[];
   config: GameConfig;
@@ -50,8 +55,10 @@ interface AccountFriendsModalProps {
   lang: Language;
   t: Translations;
   onSignInGoogle: (emailHint?: string) => void;
+  onSignInGoogleRedirect: (emailHint?: string) => void;
   onSignOut: () => void;
   onClearAuthError: () => void;
+  onRetryAccountSync: () => void;
   onAddFriend: (friend: FriendRecord) => void;
   onRemoveFriend: (friendUid: string) => void;
   onJoinFriendRoom: (roomId: string) => void;
@@ -74,6 +81,9 @@ export function AccountFriendsModal({
   firebaseUser,
   authLoading,
   authError,
+  showRedirectFallback,
+  accountSyncStatus,
+  accountSyncError,
   playerCode,
   friends,
   config,
@@ -81,8 +91,10 @@ export function AccountFriendsModal({
   bestMass,
   t,
   onSignInGoogle,
+  onSignInGoogleRedirect,
   onSignOut,
   onClearAuthError,
+  onRetryAccountSync,
   onAddFriend,
   onRemoveFriend,
   onJoinFriendRoom,
@@ -327,29 +339,53 @@ export function AccountFriendsModal({
               {/* Google Sign-In / Cloud Sync */}
               <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs dark:border-slate-800 dark:bg-slate-900/70">
                 {firebaseUser ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                        <Sparkles className="h-4 w-4" />
-                      </span>
-                      <div>
-                        <div className="text-xs font-bold text-emerald-700 dark:text-emerald-300">
-                          {t.cloudSyncedLabel}
-                        </div>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {firebaseUser.email}
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                          <Sparkles className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <div className="text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                            {accountSyncStatus === 'syncing' ? t.accountSyncingText : t.cloudSyncedLabel}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {firebaseUser.email || firebaseUser.displayName}
+                          </div>
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        disabled={authLoading}
+                        onClick={onSignOut}
+                        className="flex min-h-[42px] items-center gap-1.5 rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
+                      >
+                        <LogOut className="h-4 w-4 text-rose-500" />
+                        <span>{t.signOutBtn}</span>
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      disabled={authLoading}
-                      onClick={onSignOut}
-                      className="flex min-h-[42px] items-center gap-1.5 rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
-                    >
-                      <LogOut className="h-4 w-4 text-rose-500" />
-                      <span>{t.signOutBtn}</span>
-                    </button>
+
+                    {accountSyncStatus === 'syncing' && (
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-sky-700 dark:text-sky-300">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>{t.accountSyncingText}</span>
+                      </div>
+                    )}
+
+                    {accountSyncStatus === 'error' && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
+                        <span className="min-w-0 flex-1 break-words">
+                          {t.accountSyncErrorText} {accountSyncError}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onRetryAccountSync}
+                          className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-amber-700"
+                        >
+                          {t.retrySyncBtn}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-2.5">
@@ -381,9 +417,26 @@ export function AccountFriendsModal({
                         <span>{t.signInGoogleBtn}</span>
                       </button>
                     </div>
+                    <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                      {t.emailHintOptionalNote}
+                    </p>
                     {authError && (
-                      <div className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-200">
-                        {authError}
+                      <div className="space-y-2 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-200">
+                        <div className="flex items-start gap-1.5">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <span>{authError}</span>
+                        </div>
+                        {showRedirectFallback && (
+                          <button
+                            type="button"
+                            disabled={authLoading}
+                            onClick={() => onSignInGoogleRedirect(emailInput)}
+                            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+                          >
+                            <LogIn className="h-3.5 w-3.5" />
+                            <span>{t.tryRedirectSignInBtn}</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

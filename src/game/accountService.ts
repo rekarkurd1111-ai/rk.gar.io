@@ -14,12 +14,17 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { SKIN_MAP } from './skins';
+import {
+  decodeUnlockedSkinsWithLevels,
+  encodeUnlockedSkinsWithLevels,
+  SKIN_MAP,
+} from './skins';
 import {
   FriendRecord,
   PlayerProfile,
   PublicPlayerProfile,
   SkinId,
+  SkinLevel,
   WeeklyTopEntry,
 } from './types';
 
@@ -102,10 +107,30 @@ function clampString(raw: string, fallback: string, maxLen: number): string {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+function getUserEmailSafe(user: User): string {
+  const raw =
+    user.email ||
+    user.providerData?.find((p) => typeof p.email === 'string' && p.email.includes('@'))?.email ||
+    '';
+  return raw.trim().slice(0, 160);
+}
+
+export function extractAccountErrorReason(err: unknown): string {
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  try {
+    const parsed = JSON.parse(rawMsg) as { error?: string };
+    if (parsed && typeof parsed.error === 'string') return parsed.error;
+  } catch {
+    // Plain error string
+  }
+  return rawMsg;
+}
+
 export async function ensureCloudAccount(
   user: User,
   localState: {
     displayName: string;
+    hasLocalNickname?: boolean;
     skinId: SkinId;
     profile: PlayerProfile;
     bestMass: number;
@@ -116,9 +141,11 @@ export async function ensureCloudAccount(
   publicProfile: PublicPlayerProfile;
   mergedXp: number;
   mergedUnlockedSkins: SkinId[];
+  mergedSkinLevels: Partial<Record<SkinId, SkinLevel>>;
 }> {
   const playerPath = `players/${user.uid}`;
   const privatePath = `usersPrivate/${user.uid}`;
+  const verifiedEmail = getUserEmailSafe(user);
   const safeName = clampString(
     localState.displayName || user.displayName || 'Player',
     'Player',
@@ -172,24 +199,45 @@ export async function ensureCloudAccount(
       localState.bestMass,
       Number(existingPlayerData.bestMass) || 0
     );
-    const cloudSkins = Array.isArray(existingPrivateData?.unlockedSkins)
-      ? Array.from(
-          new Set([
-            ...localState.profile.unlockedSkins,
-            ...(existingPrivateData.unlockedSkins as SkinId[]),
-          ])
-        ).slice(0, 50)
-      : localState.profile.unlockedSkins;
+    const decodedCloud = decodeUnlockedSkinsWithLevels(existingPrivateData?.unlockedSkins);
+    const cloudSkins = Array.from(
+      new Set([...localState.profile.unlockedSkins, ...decodedCloud.unlockedSkins])
+    ).filter((id): id is SkinId => id in SKIN_MAP);
+    if (cloudSkins.length === 0) {
+      cloudSkins.push('kurdish_sun');
+    }
+
+    const mergedSkinLevels: Partial<Record<SkinId, SkinLevel>> = { ...decodedCloud.skinLevels };
+    if (localState.profile.skinLevels) {
+      for (const [k, v] of Object.entries(localState.profile.skinLevels)) {
+        if (v === 2 || v === 3) {
+          const prev = mergedSkinLevels[k as SkinId] || 1;
+          if (v > prev) mergedSkinLevels[k as SkinId] = v;
+        }
+      }
+    }
+    const encodedCloudSkins = encodeUnlockedSkinsWithLevels(cloudSkins, mergedSkinLevels);
     const cloudXp = Math.max(
       localState.profile.xp,
       Number(existingPrivateData?.xp) || 0
     );
 
+    const existingCloudName =
+      typeof existingPlayerData.displayName === 'string' && existingPlayerData.displayName.trim()
+        ? clampString(existingPlayerData.displayName, safeName, 24)
+        : safeName;
+    const mergedDisplayName = localState.hasLocalNickname ? safeName : existingCloudName;
+    const existingCloudSkin = safeSkinId(existingPlayerData.skinId);
+    const mergedSkinId =
+      localState.skinId === 'kurdish_sun' && existingCloudSkin !== 'kurdish_sun'
+        ? existingCloudSkin
+        : localState.skinId;
+
     const publicProfile: PublicPlayerProfile = {
       uid: user.uid,
       playerCode: cloudCode,
-      displayName: safeName,
-      skinId: localState.skinId,
+      displayName: mergedDisplayName,
+      skinId: mergedSkinId,
       level: cloudLevel,
       score: cloudScore,
       bestMass: cloudBest,
@@ -226,17 +274,19 @@ export async function ensureCloudAccount(
         },
         { merge: true }
       );
-      batch.set(
-        doc(db, 'usersPrivate', user.uid),
-        {
-          uid: user.uid,
-          email: (user.email || 'user@rk.gar.io').slice(0, 160),
-          xp: cloudXp,
-          unlockedSkins: cloudSkins,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      if (verifiedEmail) {
+        batch.set(
+          doc(db, 'usersPrivate', user.uid),
+          {
+            uid: user.uid,
+            email: verifiedEmail,
+            xp: cloudXp,
+            unlockedSkins: encodedCloudSkins,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
       await batch.commit();
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, playerPath);
@@ -246,6 +296,7 @@ export async function ensureCloudAccount(
       publicProfile,
       mergedXp: cloudXp,
       mergedUnlockedSkins: cloudSkins,
+      mergedSkinLevels,
     };
   }
 
@@ -276,6 +327,14 @@ export async function ensureCloudAccount(
     currentRoom: localState.currentRoom.slice(0, 24),
   };
 
+  const initialSkins: SkinId[] =
+    localState.profile.unlockedSkins.length > 0
+      ? localState.profile.unlockedSkins
+      : ['kurdish_sun'];
+  const initialSkinLevels: Partial<Record<SkinId, SkinLevel>> =
+    localState.profile.skinLevels || {};
+  const encodedInitialSkins = encodeUnlockedSkinsWithLevels(initialSkins, initialSkinLevels);
+
   try {
     const batch = writeBatch(db);
     batch.set(doc(db, 'players', user.uid), {
@@ -292,13 +351,15 @@ export async function ensureCloudAccount(
       bestMass: publicProfile.bestMass,
       updatedAt: serverTimestamp(),
     });
-    batch.set(doc(db, 'usersPrivate', user.uid), {
-      uid: user.uid,
-      email: (user.email || 'user@rk.gar.io').slice(0, 160),
-      xp: Math.max(0, localState.profile.xp),
-      unlockedSkins: localState.profile.unlockedSkins.slice(0, 50),
-      updatedAt: serverTimestamp(),
-    });
+    if (verifiedEmail) {
+      batch.set(doc(db, 'usersPrivate', user.uid), {
+        uid: user.uid,
+        email: verifiedEmail,
+        xp: Math.max(0, localState.profile.xp),
+        unlockedSkins: encodedInitialSkins,
+        updatedAt: serverTimestamp(),
+      });
+    }
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, playerPath);
@@ -307,7 +368,8 @@ export async function ensureCloudAccount(
   return {
     publicProfile,
     mergedXp: localState.profile.xp,
-    mergedUnlockedSkins: localState.profile.unlockedSkins,
+    mergedUnlockedSkins: initialSkins,
+    mergedSkinLevels: initialSkinLevels,
   };
 }
 
@@ -325,6 +387,11 @@ export async function syncCloudProfile(
 ): Promise<void> {
   if (!/^RK[0-9A-Z]{6}$/.test(playerCode)) return;
   const safeName = clampString(state.displayName || user.displayName || 'Player', 'Player', 24);
+  const verifiedEmail = getUserEmailSafe(user);
+  const safeSkins = encodeUnlockedSkinsWithLevels(
+    state.profile.unlockedSkins.length > 0 ? state.profile.unlockedSkins : ['kurdish_sun'],
+    state.profile.skinLevels
+  );
   const playerPath = `players/${user.uid}`;
   try {
     const batch = writeBatch(db);
@@ -340,21 +407,45 @@ export async function syncCloudProfile(
       currentRoom: state.currentRoom.slice(0, 24),
       updatedAt: serverTimestamp(),
     });
-    batch.update(doc(db, 'playerCodes', playerCode), {
-      displayName: safeName,
-      skinId: state.skinId,
-      level: Math.max(1, state.profile.level),
-      bestMass: Math.max(0, state.bestMass),
-      updatedAt: serverTimestamp(),
-    });
-    batch.update(doc(db, 'usersPrivate', user.uid), {
-      email: (user.email || 'user@rk.gar.io').slice(0, 160),
-      xp: Math.max(0, state.profile.xp),
-      unlockedSkins: state.profile.unlockedSkins.slice(0, 50),
-      updatedAt: serverTimestamp(),
-    });
+    batch.set(
+      doc(db, 'playerCodes', playerCode),
+      {
+        uid: user.uid,
+        playerCode,
+        displayName: safeName,
+        skinId: state.skinId,
+        level: Math.max(1, state.profile.level),
+        bestMass: Math.max(0, state.bestMass),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    if (verifiedEmail) {
+      batch.set(
+        doc(db, 'usersPrivate', user.uid),
+        {
+          uid: user.uid,
+          email: verifiedEmail,
+          xp: Math.max(0, state.profile.xp),
+          unlockedSkins: safeSkins,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
     await batch.commit();
-  } catch (err) {
+  } catch (err: unknown) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (code === 'not-found') {
+      await ensureCloudAccount(user, {
+        ...state,
+        hasLocalNickname: true,
+      });
+      return;
+    }
     handleFirestoreError(err, OperationType.UPDATE, playerPath);
   }
 }
@@ -430,15 +521,25 @@ export async function fetchCloudFriends(uid: string): Promise<FriendRecord[]> {
 }
 
 export async function addCloudFriend(uid: string, friend: FriendRecord): Promise<void> {
-  if (uid === friend.friendUid) return;
+  if (
+    !friend.friendUid ||
+    uid === friend.friendUid ||
+    friend.friendUid.startsWith('code_') ||
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(friend.friendUid)
+  ) {
+    return;
+  }
+  const cleanCode = normalizePlayerCode(friend.playerCode);
+  if (!/^RK[0-9A-Z]{6}$/.test(cleanCode)) return;
+
   const path = `friendships/${uid}/list/${friend.friendUid}`;
   try {
     await setDoc(doc(db, 'friendships', uid, 'list', friend.friendUid), {
       ownerUid: uid,
       friendUid: friend.friendUid,
-      playerCode: normalizePlayerCode(friend.playerCode),
+      playerCode: cleanCode,
       displayName: clampString(friend.displayName, 'Player', 24),
-      skinId: friend.skinId,
+      skinId: safeSkinId(friend.skinId),
       level: Math.max(1, friend.level),
       addedAt: serverTimestamp(),
     });
@@ -448,6 +549,13 @@ export async function addCloudFriend(uid: string, friend: FriendRecord): Promise
 }
 
 export async function removeCloudFriend(uid: string, friendUid: string): Promise<void> {
+  if (
+    !friendUid ||
+    friendUid.startsWith('code_') ||
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(friendUid)
+  ) {
+    return;
+  }
   const path = `friendships/${uid}/list/${friendUid}`;
   try {
     await deleteDoc(doc(db, 'friendships', uid, 'list', friendUid));
@@ -654,15 +762,21 @@ export async function upsertWeeklyTopScore(
   const addCells = Math.max(0, Math.min(1_000_000, Math.round(params.matchCellsEaten || 0)));
   const addMatches = Math.max(1, Math.min(1000, Math.round(params.matchCountDelta ?? 1)));
 
+  let snap;
   try {
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
-      const existing = snap.data() as Record<string, unknown>;
-      const prevMass = Math.max(0, Number(existing.bestMass) || 0);
-      const prevScore = Math.max(0, Number(existing.weeklyScore) || 0);
-      const prevCells = Math.max(0, Number(existing.cellsEaten) || 0);
-      const prevMatches = Math.max(1, Number(existing.matchesCount) || 1);
+    snap = await getDoc(docRef);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, path);
+  }
 
+  if (snap.exists()) {
+    const existing = snap.data() as Record<string, unknown>;
+    const prevMass = Math.max(0, Number(existing.bestMass) || 0);
+    const prevScore = Math.max(0, Number(existing.weeklyScore) || 0);
+    const prevCells = Math.max(0, Number(existing.cellsEaten) || 0);
+    const prevMatches = Math.max(1, Number(existing.matchesCount) || 1);
+
+    try {
       await updateDoc(docRef, {
         displayName: safeName,
         skinId: validSkin,
@@ -673,7 +787,11 @@ export async function upsertWeeklyTopScore(
         matchesCount: Math.min(1_000_000, prevMatches + addMatches),
         updatedAt: serverTimestamp(),
       });
-    } else {
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, path);
+    }
+  } else {
+    try {
       await setDoc(docRef, {
         uid: user.uid,
         playerCode: cleanCode,
@@ -689,9 +807,9 @@ export async function upsertWeeklyTopScore(
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, path);
     }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
 

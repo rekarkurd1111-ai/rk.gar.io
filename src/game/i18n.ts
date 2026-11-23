@@ -206,6 +206,78 @@ export interface Translations {
   fps60Desc: string;
   fps120Desc: string;
   showFpsLabel: string;
+  relaxedRoomName: string;
+  serverStatusLabel: string;
+  serverOnline: string;
+  serverConnecting: string;
+  serverOffline: string;
+  reconnectServerBtn: string;
+  connectionTimeoutText: string;
+  cancelBtn: string;
+  authErrorPopupClosed: string;
+  authErrorUnauthorizedDomain: string;
+  authErrorNetwork: string;
+  authErrorOperationNotAllowed: string;
+  authErrorInvalidEmailHint: string;
+  tryRedirectSignInBtn: string;
+  accountSyncingText: string;
+  accountSyncErrorText: string;
+  retrySyncBtn: string;
+  emailHintOptionalNote: string;
+  ownerTabArena: string;
+  ownerPowersLabel: string;
+  godModeLabel: string;
+  virusShieldLabel: string;
+  foodMagnetLabel: string;
+  autoFastMergeLabel: string;
+  instantMergeBtn: string;
+  speedBoostLabel: string;
+  addSelfXpLabel: string;
+  unlockAllSkinsBtn: string;
+  allSkinsUnlockedText: string;
+  refillBoostsBtn: string;
+  boostsRefilledText: string;
+  xpAddedText: string;
+  ownerAnnouncementLabel: string;
+  announcementPlaceholder: string;
+  sendAnnouncementBtn: string;
+  clearAnnouncementBtn: string;
+  announcementSentText: string;
+  goldenRainBtn: string;
+  goldenRainDoneText: string;
+  spawnProBotsBtn: string;
+  botsSpawnedText: string;
+  resetBotsBtn: string;
+  botsResetText: string;
+  liveModeSwitchLabel: string;
+  modeSwitchedText: string;
+  banBtn: string;
+  unbanBtn: string;
+  bannedPlayersLabel: string;
+  bannedSuccessText: string;
+  unbannedSuccessText: string;
+  bannedNotice: string;
+  halveMassBtn: string;
+  massHalvedText: string;
+  pullToMeBtn: string;
+  pulledToMeText: string;
+  giftAllOnlineTitle: string;
+  giftAllOnlineBtn: string;
+  giftAllSentText: string;
+  giftLiveMassLabel: string;
+  sendMassBtn: string;
+  massSentText: string;
+  ownerAnnouncementPrefix: string;
+  skinCatAll: string;
+  skinCatVip: string;
+  skinCatOwned: string;
+  vipBadge: string;
+  skinLevelLabel: string;
+  upgradeToLv2Btn: string;
+  upgradeToLv3Btn: string;
+  maxLevelLabel: string;
+  vipLv3PerkHint: string;
+  previewLvLabel: string;
 }
 
 export const TRANSLATIONS: Record<Language, Translations> = {
@@ -415,6 +487,78 @@ export const TRANSLATIONS: Record<Language, Translations> = {
     fps60Desc: 'ئاسایی و نەرم',
     fps120Desc: 'زۆر نەرم و خێرا',
     showFpsLabel: 'پیشاندانی FPS لە یاریدا',
+    relaxedRoomName: 'ئارام',
+    serverStatusLabel: 'دۆخی سێرڤەر',
+    serverOnline: 'ئامادەیە',
+    serverConnecting: 'پەیوەندی دەکرێت...',
+    serverOffline: 'پچڕاوە',
+    reconnectServerBtn: 'پەیوەندیکردنەوە',
+    connectionTimeoutText: 'سێرڤەر وەڵامی نەدایەوە، تکایە دووبارە هەوڵبدە.',
+    cancelBtn: 'پاشگەزبوونەوە',
+    authErrorPopupClosed: 'پەنجەرەی گووگڵ داخرا پێش تەواوبوونی چوونەژوورەوە. تکایە دووبارە هەوڵبدە.',
+    authErrorUnauthorizedDomain: 'ئەم ناونیشانە لە Firebase Auth ڕێگەی پێنەدراوە.',
+    authErrorNetwork: 'کێشەی هێڵی ئینتەرنێت هەیە لە کاتی چوونەژوورەوە.',
+    authErrorOperationNotAllowed: 'چوونەژوورەوە بە گووگڵ لە پرۆژەی Firebase چالاک نەکراوە.',
+    authErrorInvalidEmailHint: 'تکایە ئیمەیڵێکی دروست بنووسە (بۆ نموونە: name@gmail.com) یان بە بەتاڵی بهێڵەوە.',
+    tryRedirectSignInBtn: 'چوونەژوورەوە بە ڕێگای تر (Redirect)',
+    accountSyncingText: 'پاشەکەوتکردنی زانیاری ئەکاونت...',
+    accountSyncErrorText: 'هەژمارەکەت کرایەوە بەڵام پاشەکەوتی کلود کێشەی هەبوو:',
+    retrySyncBtn: 'دووبارە پاشەکەوتکردن',
+    emailHintOptionalNote: 'ئیمەیڵ دڵخوازانەیە (تەنها بۆ هەڵبژاردنی خێرای جیمێڵ لە گووگڵ)',
+    ownerTabArena: 'ئارێنا',
+    ownerPowersLabel: 'هێزە تایبەتەکانی خاوەن (لە ناو یاریدا)',
+    godModeLabel: 'نەمری (کەس ناتوانێت بتخوات)',
+    virusShieldLabel: 'قەڵغانی ڤایرۆس (ناتەقیت)',
+    foodMagnetLabel: 'موقناتیسی خواردن',
+    autoFastMergeLabel: 'یەکگرتنەوەی خێرای خۆکار',
+    instantMergeBtn: 'ئێستا بیلکێنەوە',
+    speedBoostLabel: 'خێرایی جوڵە',
+    addSelfXpLabel: 'زیادکردنی XP و لیڤڵ بۆ خۆم',
+    unlockAllSkinsBtn: 'کردنەوەی هەموو سکینەکان',
+    allSkinsUnlockedText: 'هەموو سکینەکان کرانەوە!',
+    refillBoostsBtn: '+١٠ هەموو بووستەکان',
+    boostsRefilledText: 'هەموو بووستەکان زیاد کران!',
+    xpAddedText: 'XP و لیڤڵ زیاد کران!',
+    ownerAnnouncementLabel: 'ڕاگەیاندنی گشتی بۆ هەموو یاریزانەکان',
+    announcementPlaceholder: 'پەیامی خاوەن بنووسە...',
+    sendAnnouncementBtn: 'ناردنی ڕاگەیاندن',
+    clearAnnouncementBtn: 'سڕینەوە',
+    announcementSentText: 'ڕاگەیاندنەکە بۆ هەمووان نێردرا!',
+    goldenRainBtn: 'بارانی خواردنی گۆڵد (+٤٠)',
+    goldenRainDoneText: 'بارانی خواردنی گۆڵد باری!',
+    spawnProBotsBtn: '+٥ بۆتی پرۆ زیاد بکە',
+    botsSpawnedText: '٥ بۆتی نوێ زیاد کران!',
+    resetBotsBtn: 'سڕینەوە و ڕێکخستنەوەی بۆتەکان',
+    botsResetText: 'بۆتەکان نوێ کرانەوە!',
+    liveModeSwitchLabel: 'گۆڕینی مۆدی ئارێنا بە ڕاستەوخۆ',
+    modeSwitchedText: 'مۆدی ئارێنا گۆڕا!',
+    banBtn: 'باند',
+    unbanBtn: 'لابردنی باند',
+    bannedPlayersLabel: 'یاریزانە باندکراوەکان',
+    bannedSuccessText: 'یاریزانەکە باند کرا!',
+    unbannedSuccessText: 'باندەکە لابرا!',
+    bannedNotice: 'هەژمارەکەت لەلایەن خاوەنی یارییەوە باند کراوە.',
+    halveMassBtn: 'نیوەی بارستە',
+    massHalvedText: 'بارستەی یاریزان نیوە کرا!',
+    pullToMeBtn: 'بانگکردنە لام',
+    pulledToMeText: 'یاریزان هێنرایە لات!',
+    giftAllOnlineTitle: 'دیاری گشتی بۆ هەموو یاریزانە ئۆنڵاینەکان',
+    giftAllOnlineBtn: 'ناردن بۆ هەمووان',
+    giftAllSentText: 'دیاری بۆ هەموو یاریزانە ئۆنڵاینەکان نێردرا!',
+    giftLiveMassLabel: 'ناردنی بارستە بۆ یاریزانی ئۆنڵاین',
+    sendMassBtn: 'ناردنی بارستە',
+    massSentText: 'بارستە بۆ یاریزان نێردرا!',
+    ownerAnnouncementPrefix: 'پەیامی خاوەن:',
+    skinCatAll: 'هەموو',
+    skinCatVip: 'VIP (٣ لیڤڵ)',
+    skinCatOwned: 'کڕدراوەکان',
+    vipBadge: 'VIP',
+    skinLevelLabel: 'لیڤڵ',
+    upgradeToLv2Btn: 'بەرزکردنەوە بۆ Lv.2',
+    upgradeToLv3Btn: 'بەرزکردنەوە بۆ Lv.3',
+    maxLevelLabel: 'ماکس · Lv.3',
+    vipLv3PerkHint: 'لە لیڤڵ ٣ دەدرەوشێتەوە و ڕەنگەکەی دەگۆڕێت!',
+    previewLvLabel: 'بینینی لیڤڵ:',
   },
   en: {
     brand: 'Rk.gar.io',
@@ -622,5 +766,77 @@ export const TRANSLATIONS: Record<Language, Translations> = {
     fps60Desc: 'Standard Smooth',
     fps120Desc: 'Ultra Smooth',
     showFpsLabel: 'Show live FPS counter',
+    relaxedRoomName: 'Relaxed',
+    serverStatusLabel: 'Server Status',
+    serverOnline: 'Online',
+    serverConnecting: 'Connecting...',
+    serverOffline: 'Offline',
+    reconnectServerBtn: 'Reconnect',
+    connectionTimeoutText: 'Server did not respond in time. Please try again.',
+    cancelBtn: 'Cancel',
+    authErrorPopupClosed: 'Google sign-in window closed before finishing. Please try again.',
+    authErrorUnauthorizedDomain: 'This domain is not authorized in Firebase Auth.',
+    authErrorNetwork: 'Network error during sign-in. Check your internet connection.',
+    authErrorOperationNotAllowed: 'Google sign-in is not enabled in this Firebase project.',
+    authErrorInvalidEmailHint: 'Enter a valid email (e.g. name@gmail.com) or leave blank.',
+    tryRedirectSignInBtn: 'Try Redirect Sign-In',
+    accountSyncingText: 'Syncing cloud account...',
+    accountSyncErrorText: 'Signed in, but cloud account sync encountered an error:',
+    retrySyncBtn: 'Retry Sync',
+    emailHintOptionalNote: 'Email is optional (pre-selects your Gmail in Google Sign-In)',
+    ownerTabArena: 'Arena',
+    ownerPowersLabel: 'Owner Live Powers (In-Match)',
+    godModeLabel: 'Immortal Shield (Cannot be eaten)',
+    virusShieldLabel: 'Virus Immunity (No pop)',
+    foodMagnetLabel: 'Food Magnet',
+    autoFastMergeLabel: 'Auto Fast Merge',
+    instantMergeBtn: 'Merge Now',
+    speedBoostLabel: 'Move Speed',
+    addSelfXpLabel: 'Add XP & Level Up',
+    unlockAllSkinsBtn: 'Unlock All Skins',
+    allSkinsUnlockedText: 'All skins unlocked!',
+    refillBoostsBtn: '+10 All Boosts',
+    boostsRefilledText: 'All boosts refilled!',
+    xpAddedText: 'XP & Level added!',
+    ownerAnnouncementLabel: 'Broadcast Announcement to All Players',
+    announcementPlaceholder: 'Write owner announcement...',
+    sendAnnouncementBtn: 'Broadcast',
+    clearAnnouncementBtn: 'Clear',
+    announcementSentText: 'Announcement broadcasted!',
+    goldenRainBtn: 'Golden Food Rain (+40)',
+    goldenRainDoneText: 'Golden food rained down!',
+    spawnProBotsBtn: 'Spawn +5 Pro Bots',
+    botsSpawnedText: '5 new bots spawned!',
+    resetBotsBtn: 'Reset Arena Bots',
+    botsResetText: 'Arena bots reset!',
+    liveModeSwitchLabel: 'Switch Arena Mode Live',
+    modeSwitchedText: 'Arena mode updated!',
+    banBtn: 'Ban',
+    unbanBtn: 'Unban',
+    bannedPlayersLabel: 'Banned Players',
+    bannedSuccessText: 'Player banned!',
+    unbannedSuccessText: 'Player unbanned!',
+    bannedNotice: 'Your account has been banned by the game owner.',
+    halveMassBtn: 'Halve Mass',
+    massHalvedText: 'Player mass halved!',
+    pullToMeBtn: 'Pull to Me',
+    pulledToMeText: 'Player teleported to you!',
+    giftAllOnlineTitle: 'Drop Gift to All Online Players',
+    giftAllOnlineBtn: 'Send to All Online',
+    giftAllSentText: 'Gift delivered to all online players!',
+    giftLiveMassLabel: 'Send Live Mass to Online Player',
+    sendMassBtn: 'Send Mass',
+    massSentText: 'Mass sent to player!',
+    ownerAnnouncementPrefix: 'Owner Notice:',
+    skinCatAll: 'All',
+    skinCatVip: 'VIP (3-Level)',
+    skinCatOwned: 'Owned',
+    vipBadge: 'VIP',
+    skinLevelLabel: 'Level',
+    upgradeToLv2Btn: 'Upgrade Lv.2',
+    upgradeToLv3Btn: 'Upgrade Lv.3',
+    maxLevelLabel: 'MAX · Lv.3',
+    vipLv3PerkHint: 'Level 3 glows with radiant aura & color-shifting!',
+    previewLvLabel: 'Preview:',
   },
 };

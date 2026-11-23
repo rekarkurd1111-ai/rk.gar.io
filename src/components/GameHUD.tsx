@@ -12,9 +12,11 @@ import {
   SlidersHorizontal,
   ShieldCheck,
   Zap,
+  Megaphone,
+  X,
 } from 'lucide-react';
 import { Translations } from '../game/i18n';
-import { ControlLayout, HudSnapshot, PlayType, TargetFps } from '../game/types';
+import { ControlLayout, HudSnapshot, OwnerAnnouncement, PlayType, TargetFps } from '../game/types';
 import { SkinPreview } from './SkinPreview';
 
 interface GameHUDProps {
@@ -39,6 +41,8 @@ interface GameHUDProps {
   onOpenCustomizer: () => void;
   isOwner?: boolean;
   onOpenOwnerMenu?: () => void;
+  announcement?: OwnerAnnouncement | null;
+  onDismissAnnouncement?: () => void;
   onSplit: () => void;
   onEjectStart: () => void;
   onEjectEnd: () => void;
@@ -74,6 +78,8 @@ export function GameHUD({
   onOpenCustomizer,
   isOwner = false,
   onOpenOwnerMenu,
+  announcement = null,
+  onDismissAnnouncement,
   onSplit,
   onEjectStart,
   onEjectEnd,
@@ -95,6 +101,29 @@ export function GameHUD({
 
   return (
     <div className="pointer-events-none fixed inset-0 z-10">
+      {/* Live Owner Announcement Banner */}
+      {announcement && (
+        <div className="pointer-events-auto fixed top-3 left-1/2 z-30 flex max-w-[92vw] -translate-x-1/2 items-center gap-2 rounded-2xl border border-amber-400/80 bg-amber-500/95 px-3.5 py-2 text-xs font-extrabold text-slate-950 shadow-xl backdrop-blur-md">
+          <Megaphone className="h-4 w-4 shrink-0" />
+          <span className="truncate">
+            {t.ownerAnnouncementPrefix} {announcement.text}
+          </span>
+          {onDismissAnnouncement && (
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onDismissAnnouncement();
+              }}
+              aria-label={t.closeBtn}
+              className="rounded-lg p-0.5 hover:bg-amber-600/30"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Top Row: Compact Frosted Glass Stats + Top 5 Glass Leaderboard */}
       <div className="flex items-start justify-between gap-2 p-2.5 pt-[max(0.625rem,env(safe-area-inset-top))] pl-[max(0.625rem,env(safe-area-inset-left))] pr-[max(0.625rem,env(safe-area-inset-right))] sm:gap-4 sm:p-5 [@media(max-height:520px)]:gap-2 [@media(max-height:520px)]:p-2">
         {/* Player Stats & Quick Top Actions */}
@@ -392,7 +421,7 @@ export function GameHUD({
                   <span className="font-mono-num w-3.5 shrink-0 text-[10px] text-slate-500 dark:text-slate-400 sm:w-4 sm:text-[11px]">
                     {entry.rank}.
                   </span>
-                  <SkinPreview skinId={entry.skinId} size={16} />
+                  <SkinPreview skinId={entry.skinId} size={16} skinLevel={entry.skinLevel ?? 1} />
                   <span className="truncate">{entry.name}</span>
                   {entry.isPlayer && (
                     <span className="shrink-0 text-[10px] font-bold text-sky-700 dark:text-sky-300 sm:text-[11px]">

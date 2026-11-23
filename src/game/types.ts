@@ -25,7 +25,15 @@ export type SkinId =
   | 'golden_phoenix'
   | 'neon_lotus'
   | 'galaxy_dragon'
-  | 'nexus_titan';
+  | 'nexus_titan'
+  | 'vip_barbarian'
+  | 'vip_imp'
+  | 'vip_frost_giant'
+  | 'vip_fire_lord'
+  | 'vip_shadow_king'
+  | 'vip_prismatic';
+
+export type SkinLevel = 1 | 2 | 3;
 
 export type CurrencyType = 'coins' | 'dna';
 
@@ -40,6 +48,11 @@ export interface SkinDefinition {
   price: number;
   currency: CurrencyType;
   seasonExclusive?: boolean;
+  isVip?: boolean;
+  upgradeLv2Price?: number;
+  upgradeLv2Currency?: CurrencyType;
+  upgradeLv3Price?: number;
+  upgradeLv3Currency?: CurrencyType;
 }
 
 export type BoostId = 'level_boost_2x' | 'level_boost_3x' | 'coin_boost_2x' | 'start_mass_boost' | 'xp_pack_500';
@@ -70,6 +83,7 @@ export interface PlayerProfile {
   xp: number;
   level: number;
   unlockedSkins: SkinId[];
+  skinLevels: Partial<Record<SkinId, SkinLevel>>;
   boosts: ActiveBoosts;
 }
 
@@ -90,6 +104,7 @@ export interface Cell {
   isPlayer: boolean;
   isHuman?: boolean;
   skinId: SkinId;
+  skinLevel?: SkinLevel;
   x: number;
   y: number;
   vx: number;
@@ -172,6 +187,7 @@ export interface LeaderboardEntry {
   mass: number;
   isPlayer: boolean;
   skinId: SkinId;
+  skinLevel?: SkinLevel;
   rank: number;
 }
 
@@ -245,6 +261,7 @@ export interface NetCell {
   ownerId: string;
   name: string;
   skinId: SkinId;
+  skinLevel?: SkinLevel;
   x: number;
   y: number;
   mass: number;
@@ -429,6 +446,27 @@ export interface WeeklyTopEntry {
   matchesCount: number;
   updatedAtMs?: number;
 }
+
+export interface OwnerPowers {
+  godMode: boolean;
+  virusShield: boolean;
+  speedMultiplier: 1 | 1.5 | 2.2;
+  foodMagnet: boolean;
+  autoFastMerge: boolean;
+}
+
+export interface OwnerAnnouncement {
+  id: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface BannedPlayerRecord {
+  playerCode: string;
+  uid: string;
+  name: string;
+}
+
 
 
 

@@ -1,4 +1,4 @@
-import { drawSkinPattern, SKINS, SKIN_MAP } from './skins';
+import { drawSkinPattern, drawVipOuterGlow, getDynamicSkinStroke, SKINS, SKIN_MAP } from './skins';
 import { soundFX } from './sound';
 import {
   ArenaTheme,
@@ -11,15 +11,18 @@ import {
   LeaderboardEntry,
   MinimapDot,
   NetStatePayload,
+  OwnerPowers,
   Particle,
   Ripple,
   SkinId,
+  SkinLevel,
   Virus,
 } from './types';
 
 export const WORLD_SIZE = 4200;
 const MAX_CELLS_PER_OWNER = 16;
 const MAX_CELL_MASS = 25000;
+const MAX_EJECTED_COUNT = 260;
 const TARGET_FOOD_COUNT = 640;
 const TARGET_BOT_COUNT = 36;
 const TARGET_VIRUS_COUNT = 24;
@@ -138,8 +141,17 @@ export class AgarEngine {
   >();
   private onPlayerDeath?: (snapshot: HudSnapshot) => void;
 
+  public ownerPowers: OwnerPowers = {
+    godMode: false,
+    virusShield: false,
+    speedMultiplier: 1,
+    foodMagnet: false,
+    autoFastMerge: false,
+  };
+
   public isNetworkMode = false;
   private netCellTargets = new Map<string, { x: number; y: number; radius: number; mass: number }>();
+  private netEjectedTargets = new Map<string, { x: number; y: number }>();
   private netHudSnapshot: HudSnapshot | null = null;
   private lastNetMass = 0;
   private lastNetCellCount = 0;
@@ -156,6 +168,7 @@ export class AgarEngine {
   public setNetworkMode(enabled: boolean) {
     this.isNetworkMode = enabled;
     this.netCellTargets.clear();
+    this.netEjectedTargets.clear();
     this.netHudSnapshot = null;
     this.lastNetMass = 0;
     this.lastNetCellCount = 0;
@@ -188,6 +201,7 @@ export class AgarEngine {
         }
         prev.name = nc.name;
         prev.skinId = nc.skinId;
+        prev.skinLevel = nc.skinLevel ?? 1;
         prev.isPlayer = isMe;
         prev.isHuman = nc.isHuman;
         prev.mass = nc.mass;
@@ -200,6 +214,7 @@ export class AgarEngine {
           isPlayer: isMe,
           isHuman: nc.isHuman,
           skinId: nc.skinId,
+          skinLevel: nc.skinLevel ?? 1,
           x: nc.x,
           y: nc.y,
           vx: 0,
@@ -244,19 +259,32 @@ export class AgarEngine {
       pulseOffset: (f.x + f.y) * 0.01,
     }));
 
-    this.ejected = payload.ejected.map((e) => ({
-      id: e.id,
-      ownerId: '',
-      x: e.x,
-      y: e.y,
-      vx: 0,
-      vy: 0,
-      mass: 14,
-      radius: e.r,
-      color: e.c,
-      stroke: e.s,
-      age: 0,
-    }));
+    const prevEjectedById = new Map(this.ejected.map((e) => [e.id, e]));
+    const nextEjectedTargets = new Map<string, { x: number; y: number }>();
+    this.ejected = payload.ejected.map((e) => {
+      nextEjectedTargets.set(e.id, { x: e.x, y: e.y });
+      const prev = prevEjectedById.get(e.id);
+      if (prev) {
+        prev.radius = e.r;
+        prev.color = e.c;
+        prev.stroke = e.s;
+        return prev;
+      }
+      return {
+        id: e.id,
+        ownerId: '',
+        x: e.x,
+        y: e.y,
+        vx: 0,
+        vy: 0,
+        mass: 14,
+        radius: e.r,
+        color: e.c,
+        stroke: e.s,
+        age: 0,
+      };
+    });
+    this.netEjectedTargets = nextEjectedTargets;
 
     this.viruses = payload.viruses.map((v) => ({
       id: v.id,
@@ -348,7 +376,7 @@ export class AgarEngine {
     this.cameraZoom = 0.72;
   }
 
-  public spawnPlayer(config: GameConfig, startMassBonus = 0) {
+  public spawnPlayer(config: GameConfig, startMassBonus = 0, skinLevel: SkinLevel = 1) {
     this.setConfig(config);
     // Remove any leftover player cells
     this.cells = this.cells.filter((c) => !c.isPlayer);
@@ -362,6 +390,7 @@ export class AgarEngine {
       name: config.nickname.trim() || 'یاریزان',
       isPlayer: true,
       skinId: config.skinId,
+      skinLevel,
       x: safePos.x,
       y: safePos.y,
       vx: 0,
@@ -611,6 +640,7 @@ export class AgarEngine {
 
       const launchSpeed = Math.min(980, 650 + cell.radius * 3.8);
       const childRadius = massToRadius(halfMass);
+      const childMargin = getSoftBorderMargin(childRadius);
 
       // Slight recoil stabilization on parent for cleaner forward separation
       cell.boostVx -= Math.cos(angle) * launchSpeed * 0.08;
@@ -622,8 +652,9 @@ export class AgarEngine {
         name: cell.name,
         isPlayer: cell.isPlayer,
         skinId: cell.skinId,
-        x: clamp(cell.x + Math.cos(angle) * childRadius * 1.12, childRadius, WORLD_SIZE - childRadius),
-        y: clamp(cell.y + Math.sin(angle) * childRadius * 1.12, childRadius, WORLD_SIZE - childRadius),
+        skinLevel: cell.skinLevel,
+        x: clamp(cell.x + Math.cos(angle) * childRadius * 1.12, childMargin, WORLD_SIZE - childMargin),
+        y: clamp(cell.y + Math.sin(angle) * childRadius * 1.12, childMargin, WORLD_SIZE - childMargin),
         vx: cell.vx,
         vy: cell.vy,
         boostVx: Math.cos(angle) * launchSpeed,
@@ -652,6 +683,8 @@ export class AgarEngine {
     const owned = this.cells.filter((c) => c.ownerId === 'player');
     const safeBurst = Math.max(1, Math.min(3, Math.round(burstCount)));
     let ejectedAny = false;
+    const ejectRadius = massToRadius(14);
+    const speed = safeBurst > 1 ? 900 : 760;
 
     for (let b = 0; b < safeBurst; b++) {
       for (const cell of owned) {
@@ -659,10 +692,9 @@ export class AgarEngine {
         cell.mass -= 14;
         cell.radius = massToRadius(cell.mass);
         const baseAngle = Math.atan2(pointer.y - cell.y, pointer.x - cell.x);
-        const jitter = safeBurst > 1 ? (Math.random() - 0.5) * 0.14 : 0;
+        const jitter = safeBurst > 1 ? (Math.random() - 0.5) * 0.10 : 0;
         const angle = baseAngle + jitter;
         const skin = SKIN_MAP[cell.skinId] || SKIN_MAP.ocean;
-        const speed = safeBurst > 1 ? 820 : 690;
 
         this.ejected.push({
           id: nextId('e'),
@@ -672,13 +704,17 @@ export class AgarEngine {
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
           mass: 14,
-          radius: massToRadius(14),
+          radius: ejectRadius,
           color: skin.secondary,
-          stroke: skin.stroke,
+          stroke: getDynamicSkinStroke(cell.skinId, this.time, cell.skinLevel ?? 1),
           age: 0,
         });
         ejectedAny = true;
       }
+    }
+
+    if (this.ejected.length > MAX_EJECTED_COUNT) {
+      this.ejected.splice(0, this.ejected.length - MAX_EJECTED_COUNT);
     }
 
     if (ejectedAny && playSound) {
@@ -735,12 +771,82 @@ export class AgarEngine {
     return rounded;
   }
 
+  public setOwnerPowers(powers: OwnerPowers) {
+    this.ownerPowers = { ...powers };
+    if (powers.autoFastMerge && !this.isNetworkMode) {
+      for (const c of this.cells) {
+        if (c.isPlayer) c.mergeTimer = 0;
+      }
+    }
+  }
+
+  public instantMergePlayer(): boolean {
+    if (!this.playerAlive || this.isNetworkMode) return false;
+    let changed = false;
+    for (const c of this.cells) {
+      if (c.isPlayer && c.mergeTimer > 0) {
+        c.mergeTimer = 0;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  public spawnGoldenFoodRain(count = 40) {
+    if (this.isNetworkMode) return;
+    const playerCells = this.cells.filter((c) => c.isPlayer);
+    const hasPlayer = playerCells.length > 0;
+    const cx = hasPlayer
+      ? playerCells.reduce((s, c) => s + c.x, 0) / playerCells.length
+      : WORLD_SIZE / 2;
+    const cy = hasPlayer
+      ? playerCells.reduce((s, c) => s + c.y, 0) / playerCells.length
+      : WORLD_SIZE / 2;
+
+    for (let i = 0; i < count; i++) {
+      const x = hasPlayer
+        ? clamp(cx + (Math.random() - 0.5) * 1400, 40, WORLD_SIZE - 40)
+        : 40 + Math.random() * (WORLD_SIZE - 80);
+      const y = hasPlayer
+        ? clamp(cy + (Math.random() - 0.5) * 1400, 40, WORLD_SIZE - 40)
+        : 40 + Math.random() * (WORLD_SIZE - 80);
+      this.foods.push({
+        id: nextId('f'),
+        x,
+        y,
+        mass: 4,
+        radius: 10.5,
+        color: '#FACC15',
+        isGolden: true,
+        pulseOffset: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  public spawnExtraBots(count = 5) {
+    if (this.isNetworkMode) return;
+    const safeCount = Math.max(1, Math.min(20, Math.round(count)));
+    for (let i = 0; i < safeCount; i++) {
+      this.spawnBot(true);
+    }
+  }
+
+  public resetArenaBots() {
+    if (this.isNetworkMode) return;
+    this.cells = this.cells.filter((c) => c.isPlayer);
+    this.botBrains.clear();
+    for (let i = 0; i < TARGET_BOT_COUNT; i++) {
+      this.spawnBot(true);
+    }
+  }
+
   public update(dtRaw: number) {
     const dt = Math.min(dtRaw, 0.06);
     this.time += dt;
 
     if (this.isNetworkMode) {
       const lerpFactor = 1 - Math.exp(-16 * dt);
+      const ejectLerpFactor = 1 - Math.exp(-22 * dt);
       for (const cell of this.cells) {
         const target = this.netCellTargets.get(cell.id);
         if (target) {
@@ -751,6 +857,13 @@ export class AgarEngine {
         }
         if (cell.eatPulse > 0) {
           cell.eatPulse = Math.max(0, cell.eatPulse - dt * 2.5);
+        }
+      }
+      for (const e of this.ejected) {
+        const et = this.netEjectedTargets.get(e.id);
+        if (et) {
+          e.x += (et.x - e.x) * ejectLerpFactor;
+          e.y += (et.y - e.y) * ejectLerpFactor;
         }
       }
       for (const v of this.viruses) {
@@ -798,7 +911,11 @@ export class AgarEngine {
 
     for (const cell of this.cells) {
       if (cell.mergeTimer > 0) {
-        cell.mergeTimer = Math.max(0, cell.mergeTimer - dt);
+        if (cell.isPlayer && this.ownerPowers.autoFastMerge) {
+          cell.mergeTimer = 0;
+        } else {
+          cell.mergeTimer = Math.max(0, cell.mergeTimer - dt);
+        }
       }
       if (cell.eatPulse > 0) {
         cell.eatPulse = Math.max(0, cell.eatPulse - dt * 2.5);
@@ -840,7 +957,8 @@ export class AgarEngine {
       const dist = Math.hypot(dx, dy);
 
       const botAgility = cell.isPlayer ? 1.0 : 1.12;
-      const baseSpeed = (340 / Math.pow(cell.mass, 0.34)) * speedMult * botAgility;
+      const ownerSpeedMult = cell.isPlayer ? this.ownerPowers.speedMultiplier : 1;
+      const baseSpeed = (340 / Math.pow(cell.mass, 0.34)) * speedMult * botAgility * ownerSpeedMult;
       const throttle = dist < 14 ? dist / 14 : 1;
 
       if (!isStopped && dist > 1.5) {
@@ -866,25 +984,47 @@ export class AgarEngine {
       cell.x += (cell.vx + cell.boostVx) * dt;
       cell.y += (cell.vy + cell.boostVy) * dt;
 
-      // Arena bounds clamping
-      if (cell.x < cell.radius) {
-        cell.x = cell.radius;
-        cell.boostVx = Math.abs(cell.boostVx) * 0.4;
-      } else if (cell.x > WORLD_SIZE - cell.radius) {
-        cell.x = WORLD_SIZE - cell.radius;
-        cell.boostVx = -Math.abs(cell.boostVx) * 0.4;
-      }
-      if (cell.y < cell.radius) {
-        cell.y = cell.radius;
-        cell.boostVy = Math.abs(cell.boostVy) * 0.4;
-      } else if (cell.y > WORLD_SIZE - cell.radius) {
-        cell.y = WORLD_SIZE - cell.radius;
-        cell.boostVy = -Math.abs(cell.boostVy) * 0.4;
-      }
+      // Soft elastic arena bounds clamping (allows big cells to squeeze smoothly into corners)
+      applySoftArenaBounds(cell, dt);
     }
 
     // 2. Same-owner repulsion / merging
     this.resolveSameOwnerInteractions(dt);
+
+    // 2b. Owner food magnet pull
+    if (this.ownerPowers.foodMagnet && playerCells.length > 0) {
+      const pullRadius = 320;
+      const pullStep = 340 * dt;
+      for (const f of this.foods) {
+        for (const pc of playerCells) {
+          const dx = pc.x - f.x;
+          const dy = pc.y - f.y;
+          const range = pc.radius + pullRadius;
+          if (Math.abs(dx) > range || Math.abs(dy) > range) continue;
+          const d = Math.hypot(dx, dy);
+          if (d > 2 && d < range) {
+            f.x += (dx / d) * pullStep;
+            f.y += (dy / d) * pullStep;
+            break;
+          }
+        }
+      }
+      for (const e of this.ejected) {
+        if (e.age < 0.25) continue;
+        for (const pc of playerCells) {
+          const dx = pc.x - e.x;
+          const dy = pc.y - e.y;
+          const range = pc.radius + pullRadius;
+          if (Math.abs(dx) > range || Math.abs(dy) > range) continue;
+          const d = Math.hypot(dx, dy);
+          if (d > 2 && d < range) {
+            e.x += (dx / d) * pullStep;
+            e.y += (dy / d) * pullStep;
+            break;
+          }
+        }
+      }
+    }
 
     // 3. Ejected mass physics & virus feeding
     this.updateEjectedMass(dt);
@@ -1326,6 +1466,13 @@ export class AgarEngine {
           a.y -= ny * overlap * ratioA * pushFactor;
           b.x += nx * overlap * ratioB * pushFactor;
           b.y += ny * overlap * ratioB * pushFactor;
+
+          const mA = getSoftBorderMargin(a.radius);
+          const mB = getSoftBorderMargin(b.radius);
+          a.x = clamp(a.x, mA, WORLD_SIZE - mA);
+          a.y = clamp(a.y, mA, WORLD_SIZE - mA);
+          b.x = clamp(b.x, mB, WORLD_SIZE - mB);
+          b.y = clamp(b.y, mB, WORLD_SIZE - mB);
         }
       }
     }
@@ -1361,6 +1508,7 @@ export class AgarEngine {
         angle += (Math.random() - 0.5) * 0.35;
 
         const childRadius = massToRadius(halfMass);
+        const childMargin = getSoftBorderMargin(childRadius);
         const launchSpeed = Math.min(820, 480 + childRadius * 2.2);
 
         spawned.push({
@@ -1369,8 +1517,9 @@ export class AgarEngine {
           name: cell.name,
           isPlayer: cell.isPlayer,
           skinId: cell.skinId,
-          x: clamp(cell.x + Math.cos(angle) * childRadius * 0.95, childRadius, WORLD_SIZE - childRadius),
-          y: clamp(cell.y + Math.sin(angle) * childRadius * 0.95, childRadius, WORLD_SIZE - childRadius),
+          skinLevel: cell.skinLevel,
+          x: clamp(cell.x + Math.cos(angle) * childRadius * 0.95, childMargin, WORLD_SIZE - childMargin),
+          y: clamp(cell.y + Math.sin(angle) * childRadius * 0.95, childMargin, WORLD_SIZE - childMargin),
           vx: cell.vx,
           vy: cell.vy,
           boostVx: Math.cos(angle) * launchSpeed,
@@ -1398,19 +1547,26 @@ export class AgarEngine {
 
   private updateEjectedMass(dt: number) {
     const remaining: EjectedMass[] = [];
+    const drag = Math.pow(0.04, dt);
 
     for (const e of this.ejected) {
       e.age += dt;
-      e.vx *= Math.pow(0.04, dt);
-      e.vy *= Math.pow(0.04, dt);
-      e.x = clamp(e.x + e.vx * dt, e.radius, WORLD_SIZE - e.radius);
-      e.y = clamp(e.y + e.vy * dt, e.radius, WORLD_SIZE - e.radius);
+      if (Math.abs(e.vx) > 0.5 || Math.abs(e.vy) > 0.5) {
+        e.vx *= drag;
+        e.vy *= drag;
+        e.x = clamp(e.x + e.vx * dt, e.radius, WORLD_SIZE - e.radius);
+        e.y = clamp(e.y + e.vy * dt, e.radius, WORLD_SIZE - e.radius);
+      }
 
       let consumed = false;
 
-      // Check virus feeding
+      // Check virus feeding (fast AABB + squared distance)
       for (const v of this.viruses) {
-        if (Math.hypot(e.x - v.x, e.y - v.y) < v.radius + e.radius * 0.5) {
+        const hitR = v.radius + e.radius * 0.5;
+        const dx = e.x - v.x;
+        const dy = e.y - v.y;
+        if (Math.abs(dx) > hitR || Math.abs(dy) > hitR) continue;
+        if (dx * dx + dy * dy < hitR * hitR) {
           v.feedCount += 1;
           v.lastFeedAngle = Math.atan2(e.vy, e.vx);
           v.mass += 6;
@@ -1435,10 +1591,13 @@ export class AgarEngine {
 
       if (consumed) continue;
 
-      // Check cell eating ejected mass
+      // Check cell eating ejected mass (fast AABB + squared distance)
       for (const c of this.cells) {
-        if (c.ownerId === e.ownerId && e.age < 0.28) continue;
-        if (Math.hypot(e.x - c.x, e.y - c.y) < c.radius) {
+        if (c.ownerId === e.ownerId && e.age < 0.25) continue;
+        const dx = e.x - c.x;
+        const dy = e.y - c.y;
+        if (Math.abs(dx) > c.radius || Math.abs(dy) > c.radius) continue;
+        if (dx * dx + dy * dy < c.radius * c.radius) {
           c.mass += e.mass;
           c.radius = massToRadius(c.mass);
           c.eatPulse = 0.25;
@@ -1450,12 +1609,16 @@ export class AgarEngine {
         }
       }
 
-      if (!consumed && e.age < 45) {
+      if (!consumed && e.age < 24) {
         remaining.push(e);
       }
     }
 
-    this.ejected = remaining;
+    if (remaining.length > MAX_EJECTED_COUNT) {
+      this.ejected = remaining.slice(remaining.length - MAX_EJECTED_COUNT);
+    } else {
+      this.ejected = remaining;
+    }
   }
 
   private updateViruses(dt: number) {
@@ -1471,6 +1634,7 @@ export class AgarEngine {
 
       for (const cell of this.cells) {
         if (cell.mass < 122) continue;
+        if (cell.isPlayer && this.ownerPowers.virusShield) continue;
         const dist = Math.hypot(cell.x - v.x, cell.y - v.y);
         if (dist < cell.radius - v.radius * 0.2) {
           poppedViruses.add(v.id);
@@ -1490,14 +1654,16 @@ export class AgarEngine {
               const angle = (k * Math.PI * 2) / maxSplits + (Math.random() - 0.5) * 0.3;
               const speed = 420 + Math.random() * 240;
               const r = massToRadius(pieceMass);
+              const fragMargin = getSoftBorderMargin(r);
               newFragments.push({
                 id: nextId(cell.isPlayer ? 'p' : 'b'),
                 ownerId: cell.ownerId,
                 name: cell.name,
                 isPlayer: cell.isPlayer,
                 skinId: cell.skinId,
-                x: clamp(cell.x + Math.cos(angle) * (r * 0.9), r, WORLD_SIZE - r),
-                y: clamp(cell.y + Math.sin(angle) * (r * 0.9), r, WORLD_SIZE - r),
+                skinLevel: cell.skinLevel,
+                x: clamp(cell.x + Math.cos(angle) * (r * 0.9), fragMargin, WORLD_SIZE - fragMargin),
+                y: clamp(cell.y + Math.sin(angle) * (r * 0.9), fragMargin, WORLD_SIZE - fragMargin),
                 vx: cell.vx,
                 vy: cell.vy,
                 boostVx: Math.cos(angle) * speed,
@@ -1582,6 +1748,7 @@ export class AgarEngine {
         const prey = sorted[j];
         if (deadIds.has(prey.id)) continue;
         if (eater.ownerId === prey.ownerId) continue;
+        if (prey.isPlayer && this.ownerPowers.godMode) continue;
         if (eater.mass <= prey.mass * 1.22) continue;
 
         const dist = Math.hypot(eater.x - prey.x, eater.y - prey.y);
@@ -1735,7 +1902,7 @@ export class AgarEngine {
   public getHudSnapshot(): HudSnapshot {
     const ownerTotals = new Map<
       string,
-      { ownerId: string; name: string; mass: number; isPlayer: boolean; skinId: SkinId; x: number; y: number }
+      { ownerId: string; name: string; mass: number; isPlayer: boolean; skinId: SkinId; skinLevel: SkinLevel; x: number; y: number }
     >();
 
     for (const c of this.cells) {
@@ -1751,6 +1918,7 @@ export class AgarEngine {
           mass: c.mass,
           isPlayer: c.isPlayer,
           skinId: c.skinId,
+          skinLevel: c.skinLevel ?? 1,
           x: c.x,
           y: c.y,
         });
@@ -1768,6 +1936,7 @@ export class AgarEngine {
       mass: Math.round(entry.mass),
       isPlayer: entry.isPlayer,
       skinId: entry.skinId,
+      skinLevel: entry.skinLevel,
       rank: idx + 1,
     }));
 
@@ -2096,11 +2265,15 @@ export class AgarEngine {
   }
 
   private renderCell(ctx: CanvasRenderingContext2D, cell: Cell) {
-    const skin = SKIN_MAP[cell.skinId] || SKIN_MAP.ocean;
+    const skinLevel: SkinLevel = cell.skinLevel ?? 1;
     const points = cell.radius > 70 ? 48 : cell.radius > 35 ? 36 : 24;
     const pulseScale = 1 + cell.eatPulse * 0.08;
 
     ctx.save();
+    if (skinLevel >= 2) {
+      drawVipOuterGlow(ctx, cell.skinId, cell.x, cell.y, cell.radius * pulseScale, this.time, skinLevel);
+    }
+
     ctx.beginPath();
 
     for (let i = 0; i < points; i++) {
@@ -2110,17 +2283,21 @@ export class AgarEngine {
         Math.sin(angle * 4 + this.time * 4.2 + cell.wobblePhase) * wobbleAmp +
         Math.cos(angle * 3 - this.time * 2.8 + cell.wobblePhase) * (wobbleAmp * 0.5);
       const r = cell.radius * pulseScale + wobble;
-      const px = cell.x + Math.cos(angle) * r;
-      const py = cell.y + Math.sin(angle) * r;
+      let px = cell.x + Math.cos(angle) * r;
+      let py = cell.y + Math.sin(angle) * r;
+      if (px < 0) px *= 0.36;
+      else if (px > WORLD_SIZE) px = WORLD_SIZE + (px - WORLD_SIZE) * 0.36;
+      if (py < 0) py *= 0.36;
+      else if (py > WORLD_SIZE) py = WORLD_SIZE + (py - WORLD_SIZE) * 0.36;
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
     ctx.closePath();
 
-    drawSkinPattern(ctx, cell.skinId, cell.x, cell.y, cell.radius * pulseScale, this.time);
+    drawSkinPattern(ctx, cell.skinId, cell.x, cell.y, cell.radius * pulseScale, this.time, skinLevel);
 
     ctx.lineWidth = Math.max(3, Math.min(8, cell.radius * 0.08));
-    ctx.strokeStyle = skin.stroke;
+    ctx.strokeStyle = getDynamicSkinStroke(cell.skinId, this.time, skinLevel);
     ctx.stroke();
 
     // Name & Mass text
@@ -2154,4 +2331,69 @@ export class AgarEngine {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function getSoftBorderMargin(radius: number): number {
+  return radius <= 36 ? radius : 36 + (radius - 36) * 0.44;
+}
+
+function applySoftArenaBounds(
+  cell: {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    boostVx: number;
+    boostVy: number;
+    radius: number;
+  },
+  dt: number
+) {
+  const minMargin = getSoftBorderMargin(cell.radius);
+  const maxX = WORLD_SIZE - minMargin;
+  const maxY = WORLD_SIZE - minMargin;
+
+  if (cell.radius > 36) {
+    const cushionSpan = Math.max(1, cell.radius - minMargin);
+    const frameScale = dt * 60;
+    if (cell.x < cell.radius && cell.vx + cell.boostVx < 0) {
+      const depth = clamp((cell.radius - cell.x) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vx *= damp;
+      cell.boostVx *= damp;
+    } else if (cell.x > WORLD_SIZE - cell.radius && cell.vx + cell.boostVx > 0) {
+      const depth = clamp((cell.x - (WORLD_SIZE - cell.radius)) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vx *= damp;
+      cell.boostVx *= damp;
+    }
+
+    if (cell.y < cell.radius && cell.vy + cell.boostVy < 0) {
+      const depth = clamp((cell.radius - cell.y) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vy *= damp;
+      cell.boostVy *= damp;
+    } else if (cell.y > WORLD_SIZE - cell.radius && cell.vy + cell.boostVy > 0) {
+      const depth = clamp((cell.y - (WORLD_SIZE - cell.radius)) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vy *= damp;
+      cell.boostVy *= damp;
+    }
+  }
+
+  if (cell.x < minMargin) {
+    cell.x = minMargin;
+    if (cell.boostVx < 0) cell.boostVx *= 0.12;
+  } else if (cell.x > maxX) {
+    cell.x = maxX;
+    if (cell.boostVx > 0) cell.boostVx *= 0.12;
+  }
+
+  if (cell.y < minMargin) {
+    cell.y = minMargin;
+    if (cell.boostVy < 0) cell.boostVy *= 0.12;
+  } else if (cell.y > maxY) {
+    cell.y = maxY;
+    if (cell.boostVy > 0) cell.boostVy *= 0.12;
+  }
 }

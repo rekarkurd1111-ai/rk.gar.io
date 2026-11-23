@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import {
+  getRedirectResult,
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+  User,
+} from 'firebase/auth';
 import { AccountFriendsModal } from './components/AccountFriendsModal';
 import { ControlCustomizer } from './components/ControlCustomizer';
 import { GameHUD } from './components/GameHUD';
@@ -9,7 +16,7 @@ import { MenuOverlay } from './components/MenuOverlay';
 import { OwnerMenuModal } from './components/OwnerMenuModal';
 import { ShopModal } from './components/ShopModal';
 import { WorldTopModal } from './components/WorldTopModal';
-import { auth, isVerifiedOwnerUser } from './firebase';
+import { auth, createGoogleProvider, isValidEmailFormat, isVerifiedOwnerUser } from './firebase';
 import {
   addCloudFriend,
   adminCreateCloudGrant,
@@ -17,11 +24,13 @@ import {
   claimPendingCloudGrants,
   clearLocalWeeklyPending,
   ensureCloudAccount,
+  extractAccountErrorReason,
   fetchCloudFriends,
   fetchWeeklyTopEntries,
   getOrCreateLocalPlayerCode,
   loadLocalFriends,
   loadLocalWeeklyPending,
+  normalizePlayerCode,
   recordLocalWeeklyMatch,
   removeCloudFriend,
   saveLocalFriends,
@@ -55,14 +64,16 @@ import {
   loadProfile,
   saveProfile,
 } from './game/progression';
-import { SKIN_MAP } from './game/skins';
+import { getSkinLevel, SKINS, SKIN_MAP } from './game/skins';
 import { soundFX } from './game/sound';
 import {
   AccountModalTab,
+  BannedPlayerRecord,
   BoostId,
   ControlLayout,
   FriendRecord,
   GameConfig,
+  GameMode,
   GamePassState,
   GamePhase,
   HudSnapshot,
@@ -71,12 +82,15 @@ import {
   MatchRewardSummary,
   MazeEventState,
   NetStatePayload,
+  OwnerAnnouncement,
+  OwnerPowers,
   PassTrack,
   PlayerProfile,
   PublicPlayerProfile,
   RoomSummary,
   ShopTab,
   SkinId,
+  SkinLevel,
   TargetFps,
   WeeklyTopEntry,
 } from './game/types';
@@ -159,18 +173,31 @@ export default function App() {
   const [lastRewards, setLastRewards] = useState<MatchRewardSummary | null>(null);
   const [lastTokensEarned, setLastTokensEarned] = useState(0);
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
+  const [serverStatus, setServerStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [showRedirectFallback, setShowRedirectFallback] = useState(false);
+  const [accountSyncStatus, setAccountSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
+  const [accountSyncError, setAccountSyncError] = useState<string | null>(null);
   const [playerCode, setPlayerCode] = useState<string>(getOrCreateLocalPlayerCode);
   const [friends, setFriends] = useState<FriendRecord[]>(loadLocalFriends);
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountTab, setAccountTab] = useState<AccountModalTab>('account');
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const [ownerPowers, setOwnerPowers] = useState<OwnerPowers>({
+    godMode: false,
+    virusShield: false,
+    speedMultiplier: 1,
+    foodMagnet: false,
+    autoFastMerge: false,
+  });
   const [livePlayers, setLivePlayers] = useState<LiveServerPlayer[]>([]);
   const [cloudPlayers, setCloudPlayers] = useState<PublicPlayerProfile[]>([]);
+  const [bannedPlayers, setBannedPlayers] = useState<BannedPlayerRecord[]>([]);
+  const [announcement, setAnnouncement] = useState<OwnerAnnouncement | null>(null);
   const [loadingAdminPlayers, setLoadingAdminPlayers] = useState(false);
   const [kickedNotice, setKickedNotice] = useState<string | null>(null);
   const [grantNotice, setGrantNotice] = useState<string | null>(null);
@@ -201,8 +228,13 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<AgarEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsConnectedAtRef = useRef<number>(0);
+  const wsLastActivityRef = useRef<number>(0);
   const connectionIdRef = useRef<string>('');
-  const pendingJoinRef = useRef<{ effectiveConfig: GameConfig; startMassBonus: number } | null>(null);
+  const pendingJoinRef = useRef<{ effectiveConfig: GameConfig; useStartMassBoost: boolean } | null>(null);
+  const pendingStartMassBoostRef = useRef<boolean>(false);
+  const joinTimeoutRef = useRef<number | null>(null);
+  const cloudSyncedUidRef = useRef<string | null>(null);
   const phaseRef = useRef<GamePhase>(phase);
   const customizerOpenRef = useRef<boolean>(customizerOpen);
   const ownerMenuOpenRef = useRef<boolean>(ownerMenuOpen);
@@ -214,10 +246,12 @@ export default function App() {
   const passStateRef = useRef<GamePassState>(passState);
   const mazeEventRef = useRef<MazeEventState>(mazeEvent);
   const bestMassRef = useRef<number>(bestMass);
+  const ownerPowersRef = useRef<OwnerPowers>(ownerPowers);
   const sessionBestRankRef = useRef<number>(0);
   const targetFpsRef = useRef<TargetFps>(config.targetFps);
   const wHeldRef = useRef(false);
   const fastEjectHeldRef = useRef(false);
+  const netEjectModeRef = useRef<'off' | 'normal' | 'fast'>('off');
   const stickRef = useRef<TouchJoystick | null>(null);
   const padPointerIdRef = useRef<number | null>(null);
   const padCenterRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -235,9 +269,33 @@ export default function App() {
   passStateRef.current = passState;
   mazeEventRef.current = mazeEvent;
   bestMassRef.current = bestMass;
+  ownerPowersRef.current = ownerPowers;
   targetFpsRef.current = config.targetFps;
 
   const t = TRANSLATIONS[lang];
+
+  const syncOnlineEjectHold = useCallback(() => {
+    const nextMode: 'off' | 'normal' | 'fast' =
+      phaseRef.current === 'PLAYING' && !customizerOpenRef.current
+        ? fastEjectHeldRef.current
+          ? 'fast'
+          : wHeldRef.current
+          ? 'normal'
+          : 'off'
+        : 'off';
+    if (nextMode === netEjectModeRef.current) return;
+    netEjectModeRef.current = nextMode;
+    if (engineRef.current?.isNetworkMode) {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'eject_hold', mode: nextMode }));
+        } catch {
+          // Ignore send errors
+        }
+      }
+    }
+  }, []);
 
   const updateHudSnapshot = useCallback((snap: HudSnapshot) => {
     if (snap.rank > 0 && (sessionBestRankRef.current === 0 || snap.rank < sessionBestRankRef.current)) {
@@ -250,13 +308,14 @@ export default function App() {
   const resetActiveTouches = useCallback(() => {
     wHeldRef.current = false;
     fastEjectHeldRef.current = false;
+    syncOnlineEjectHold();
     stickRef.current = null;
     padPointerIdRef.current = null;
     canvasPointersRef.current.clear();
     pinchDistRef.current = null;
     setTouchStick(null);
     setJoystickPadDelta(null);
-  }, []);
+  }, [syncOnlineEjectHold]);
 
   const refreshWeeklyTop = useCallback(async () => {
     setLoadingWeeklyTop(true);
@@ -320,21 +379,19 @@ export default function App() {
     saveLocalFriends(friends);
   }, [friends]);
 
-  // Firebase Authentication & Cloud Account / Friends / Pending Grants Sync
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (!user) {
-        setOwnerMenuOpen(false);
-        return;
-      }
+  const syncCloudAccountForUser = useCallback(
+    async (user: User) => {
+      setAccountSyncStatus('syncing');
+      setAccountSyncError(null);
 
       try {
+        const localNick = configRef.current.nickname.trim();
         const res = await ensureCloudAccount(user, {
           displayName:
-            configRef.current.nickname.trim() ||
+            localNick ||
             user.displayName ||
             TRANSLATIONS[langRef.current].defaultPlayerName,
+          hasLocalNickname: Boolean(localNick),
           skinId: configRef.current.skinId,
           profile: profileRef.current,
           bestMass: bestMassRef.current,
@@ -343,7 +400,27 @@ export default function App() {
           online: true,
         });
 
+        // Guard against stale async completion after sign-out or account switch
+        if (firebaseUserRef.current?.uid !== user.uid) return;
+
         setPlayerCode(res.publicProfile.playerCode);
+        playerCodeRef.current = res.publicProfile.playerCode;
+
+        if (!localNick && res.publicProfile.displayName) {
+          setConfig((prev) => ({
+            ...prev,
+            nickname: prev.nickname.trim() ? prev.nickname : res.publicProfile.displayName,
+            skinId:
+              prev.skinId === 'kurdish_sun' && res.publicProfile.skinId !== 'kurdish_sun'
+                ? res.publicProfile.skinId
+                : prev.skinId,
+          }));
+        } else if (
+          configRef.current.skinId === 'kurdish_sun' &&
+          res.publicProfile.skinId !== 'kurdish_sun'
+        ) {
+          setConfig((prev) => ({ ...prev, skinId: res.publicProfile.skinId }));
+        }
 
         if (res.publicProfile.bestMass > bestMassRef.current) {
           setBestMass(res.publicProfile.bestMass);
@@ -360,17 +437,27 @@ export default function App() {
           soundFX.playEatCell();
         }
 
-        setProfile((prev) => ({
-          ...prev,
-          coins: Math.max(prev.coins, res.publicProfile.coins) + pendingGrants.coins,
-          dna: Math.max(prev.dna, res.publicProfile.dna) + pendingGrants.dna,
-          level: Math.max(prev.level, res.publicProfile.level),
-          score: Math.max(prev.score, res.publicProfile.score),
-          xp: Math.max(prev.xp, res.mergedXp),
-          unlockedSkins: Array.from(
-            new Set([...prev.unlockedSkins, ...res.mergedUnlockedSkins])
-          ),
-        }));
+        setProfile((prev) => {
+          const nextLevels: Partial<Record<SkinId, SkinLevel>> = { ...prev.skinLevels };
+          for (const [k, v] of Object.entries(res.mergedSkinLevels || {})) {
+            if (v === 2 || v === 3) {
+              const cur = nextLevels[k as SkinId] || 1;
+              if (v > cur) nextLevels[k as SkinId] = v;
+            }
+          }
+          return {
+            ...prev,
+            coins: Math.max(prev.coins, res.publicProfile.coins) + pendingGrants.coins,
+            dna: Math.max(prev.dna, res.publicProfile.dna) + pendingGrants.dna,
+            level: Math.max(prev.level, res.publicProfile.level),
+            score: Math.max(prev.score, res.publicProfile.score),
+            xp: Math.max(prev.xp, res.mergedXp),
+            unlockedSkins: Array.from(
+              new Set([...prev.unlockedSkins, ...res.mergedUnlockedSkins])
+            ),
+            skinLevels: nextLevels,
+          };
+        });
 
         const cloudFriends = await fetchCloudFriends(user.uid);
         if (cloudFriends.length > 0) {
@@ -404,17 +491,55 @@ export default function App() {
             console.error('Weekly pending sync warning:', weeklyErr);
           }
         }
+
+        cloudSyncedUidRef.current = user.uid;
+        setAccountSyncStatus('synced');
       } catch (err) {
         console.error('Account sync error:', err);
+        setAccountSyncStatus('error');
+        setAccountSyncError(extractAccountErrorReason(err));
+      }
+    },
+    [refreshWeeklyTop]
+  );
+
+  // Firebase Authentication & Redirect Result & Cloud Account / Friends / Pending Grants Sync
+  useEffect(() => {
+    void getRedirectResult(auth).catch((err: unknown) => {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      if (code && code !== 'auth/no-auth-event' && code !== 'auth/cancelled-popup-request') {
+        setAuthError(`${TRANSLATIONS[langRef.current].authErrorGeneric} (${code})`);
       }
     });
 
-    return () => unsubscribe();
-  }, [refreshWeeklyTop]);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      firebaseUserRef.current = user;
+      if (!user) {
+        cloudSyncedUidRef.current = null;
+        setAccountSyncStatus('idle');
+        setAccountSyncError(null);
+        setOwnerMenuOpen(false);
+        return;
+      }
 
-  // Debounced cloud profile sync while signed in
+      setAuthError(null);
+      setShowRedirectFallback(false);
+      void syncCloudAccountForUser(user);
+    });
+
+    return () => unsubscribe();
+  }, [syncCloudAccountForUser]);
+
+  // Debounced cloud profile sync while signed in AND initial cloud sync completed
   useEffect(() => {
     if (!firebaseUser) return;
+    if (accountSyncStatus !== 'synced' || cloudSyncedUidRef.current !== firebaseUser.uid) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       void syncCloudProfile(firebaseUser, playerCode, {
         displayName:
@@ -426,36 +551,58 @@ export default function App() {
         bestMass,
         currentRoom: config.playType === 'online' ? config.roomId : 'solo',
         online: true,
-      }).catch((err) => console.error('Cloud profile sync warning:', err));
+      }).catch((err) => {
+        console.error('Cloud profile sync warning:', err);
+      });
     }, 1200);
     return () => window.clearTimeout(timer);
-  }, [firebaseUser, playerCode, config.nickname, config.skinId, config.playType, config.roomId, profile, bestMass, lang]);
+  }, [
+    firebaseUser,
+    accountSyncStatus,
+    playerCode,
+    config.nickname,
+    config.skinId,
+    config.playType,
+    config.roomId,
+    profile,
+    bestMass,
+    lang,
+  ]);
+
+  const fetchRoomsNow = useCallback(async () => {
+    try {
+      const res = await fetch('/api/rooms', { cache: 'no-store' });
+      if (!res.ok) return false;
+      const data = (await res.json()) as { rooms?: RoomSummary[] };
+      if (Array.isArray(data.rooms)) {
+        setRooms(data.rooms);
+        return true;
+      }
+    } catch {
+      // Ignore transient fetch errors
+    }
+    return false;
+  }, []);
 
   // Poll available online rooms while on Menu
   useEffect(() => {
     if (phase !== 'MENU') return;
     let cancelled = false;
 
-    const fetchRooms = async () => {
-      try {
-        const res = await fetch('/api/rooms');
-        if (!res.ok) return;
-        const data = (await res.json()) as { rooms?: RoomSummary[] };
-        if (!cancelled && Array.isArray(data.rooms)) {
-          setRooms(data.rooms);
-        }
-      } catch {
-        // Ignore transient fetch errors
+    const poll = async () => {
+      const ok = await fetchRoomsNow();
+      if (!cancelled && !ok && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
+        setServerStatus('offline');
       }
     };
 
-    fetchRooms();
-    const timer = window.setInterval(fetchRooms, 4000);
+    void poll();
+    const timer = window.setInterval(() => void poll(), 4000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [phase]);
+  }, [phase, fetchRoomsNow]);
 
   const leaveOnlineMatch = useCallback(() => {
     pendingJoinRef.current = null;
@@ -482,6 +629,7 @@ export default function App() {
             firebaseUserRef.current?.displayName ||
             TRANSLATIONS[langRef.current].defaultPlayerName,
           skinId: configRef.current.skinId,
+          skinLevel: getSkinLevel(profileRef.current.skinLevels, configRef.current.skinId),
           level: profileRef.current.level,
         })
       );
@@ -533,7 +681,11 @@ export default function App() {
       setMazeEvent(nextEvent);
       setLastTokensEarned(tokensEarned);
 
-      if (firebaseUserRef.current) {
+      if (
+        firebaseUserRef.current &&
+        cloudSyncedUidRef.current === firebaseUserRef.current.uid &&
+        /^RK[0-9A-Z]{6}$/.test(playerCodeRef.current)
+      ) {
         void upsertWeeklyTopScore(firebaseUserRef.current, playerCodeRef.current, {
           displayName:
             configRef.current.nickname.trim() ||
@@ -547,7 +699,10 @@ export default function App() {
           matchCountDelta: 1,
         })
           .then(() => refreshWeeklyTop())
-          .catch((err) => console.error('Weekly score upload warning:', err));
+          .catch((err) => {
+            console.error('Weekly score upload warning:', err);
+            recordLocalWeeklyMatch(snapshot.peakMass, rewards.scoreGained, snapshot.cellsEaten);
+          });
       } else {
         recordLocalWeeklyMatch(snapshot.peakMass, rewards.scoreGained, snapshot.cellsEaten);
       }
@@ -627,33 +782,25 @@ export default function App() {
 
       if (!isSoloPaused) {
         if (phaseRef.current === 'PLAYING' && !customizerOpenRef.current) {
-          if (fastEjectHeldRef.current && now - lastFastEjectTime >= (engine.isNetworkMode ? 26 : 16)) {
-            const canSound = now - lastFastSoundTime >= 65;
-            if (engine.isNetworkMode) {
-              const ws = wsRef.current;
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'eject', count: 2 }));
-                if (canSound) {
-                  soundFX.playEject();
-                  lastFastSoundTime = now;
-                }
+          if (engine.isNetworkMode) {
+            if ((fastEjectHeldRef.current || wHeldRef.current) && now - lastFastSoundTime >= 85) {
+              if (engine.getHudSnapshot().canEject) {
+                soundFX.playEject();
+                lastFastSoundTime = now;
               }
-            } else {
+            }
+          } else {
+            if (fastEjectHeldRef.current && now - lastFastEjectTime >= 18) {
+              const canSound = now - lastFastSoundTime >= 75;
               engine.ejectPlayerMass(2, canSound);
               if (canSound) lastFastSoundTime = now;
+              lastFastEjectTime = now;
+            } else if (wHeldRef.current && now - lastEjectTime >= 52) {
+              const canSound = now - lastFastSoundTime >= 80;
+              engine.ejectPlayerMass(1, canSound);
+              if (canSound) lastFastSoundTime = now;
+              lastEjectTime = now;
             }
-            lastFastEjectTime = now;
-          } else if (wHeldRef.current && now - lastEjectTime > 125) {
-            if (engine.isNetworkMode) {
-              const ws = wsRef.current;
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'eject', count: 1 }));
-                soundFX.playEject();
-              }
-            } else {
-              engine.ejectPlayerMass(1, true);
-            }
-            lastEjectTime = now;
           }
         }
 
@@ -695,144 +842,301 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handlePlayerDeath]);
 
-  // Persistent Presence + Gameplay WebSocket Connection
-  const connectPresenceSocket = useCallback(() => {
-    if (
-      wsRef.current &&
-      (wsRef.current.readyState === WebSocket.OPEN ||
-        wsRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
+  const clearJoinTimeout = useCallback(() => {
+    if (joinTimeoutRef.current !== null) {
+      window.clearTimeout(joinTimeoutRef.current);
+      joinTimeoutRef.current = null;
     }
+  }, []);
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      sendPresenceUpdate(ws);
-      const pending = pendingJoinRef.current;
-      if (pending) {
-        pendingJoinRef.current = null;
-        engineRef.current?.setNetworkMode(true);
-        ws.send(
-          JSON.stringify({
-            type: 'join',
-            roomId: pending.effectiveConfig.roomId.trim() || 'global',
-            name: pending.effectiveConfig.nickname,
-            skinId: pending.effectiveConfig.skinId,
-            mode: pending.effectiveConfig.mode,
-            startMassBonus: pending.startMassBonus,
-            uid: firebaseUserRef.current?.uid || '',
-            playerCode: playerCodeRef.current,
-            level: profileRef.current.level,
-          })
-        );
+  // Persistent Presence + Gameplay WebSocket Connection
+  const connectPresenceSocket = useCallback(
+    (forceReconnect = false) => {
+      if (forceReconnect && wsRef.current) {
+        const prev = wsRef.current;
+        wsRef.current = null;
+        try {
+          prev.close();
+        } catch {
+          // Ignore close error
+        }
       }
-    };
 
-    ws.onmessage = (event) => {
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(String(event.data));
-      } catch {
+      if (
+        wsRef.current &&
+        (wsRef.current.readyState === WebSocket.OPEN ||
+          wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
         return;
       }
 
-      if (msg.type === 'welcome') {
-        connectionIdRef.current = typeof msg.connectionId === 'string' ? msg.connectionId : '';
+      setServerStatus('connecting');
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      wsRef.current = ws;
+      wsConnectedAtRef.current = Date.now();
+      wsLastActivityRef.current = Date.now();
+
+      ws.onopen = () => {
+        if (wsRef.current !== ws) return;
+        wsLastActivityRef.current = Date.now();
+        setServerStatus('connected');
         sendPresenceUpdate(ws);
-      } else if (msg.type === 'joined') {
-        setConnecting(false);
-        setConnectionError(null);
-        setIsNewRecord(false);
-        setLastSummary(null);
-        setLastRewards(null);
-        setLastTokensEarned(0);
-        sessionBestRankRef.current = 0;
-        setSessionBestRank(0);
-        resetActiveTouches();
-        engineRef.current?.setPointerScreen(window.innerWidth / 2, window.innerHeight / 2);
-        setPhase('PLAYING');
-      } else if (msg.type === 'state') {
-        const engine = engineRef.current;
-        if (engine && engine.isNetworkMode) {
-          const snap = engine.applyNetworkState(msg as unknown as NetStatePayload);
-          updateHudSnapshot(snap);
-        }
-      } else if (msg.type === 'died') {
-        soundFX.playGameOver();
-        const peakMass = Number(msg.peakMass) || 0;
-        const cellsEaten = Number(msg.cellsEaten) || 0;
-        const foodsEaten = Number(msg.foodsEaten) || 0;
-        const splitsUsed = Number(msg.splitsUsed) || 0;
-        const elapsedSeconds = Number(msg.elapsedSeconds) || 0;
-        const engine = engineRef.current;
-        const summary: HudSnapshot = {
-          ...(engine ? engine.getHudSnapshot() : hud),
-          peakMass,
-          cellsEaten,
-          foodsEaten,
-          splitsUsed,
-          elapsedSeconds,
-          score: Math.round(peakMass * 2 + cellsEaten * 85 + elapsedSeconds * 1.5),
-          killerName: typeof msg.killerName === 'string' ? msg.killerName : null,
-        };
-        handlePlayerDeath(summary);
-      } else if (msg.type === 'kicked') {
-        resetActiveTouches();
-        pendingJoinRef.current = null;
-        engineRef.current?.setNetworkMode(false);
-        setConnecting(false);
-        setCustomizerOpen(false);
-        setKickedNotice(TRANSLATIONS[langRef.current].kickedNotice);
-        setPhase('MENU');
-      } else if (msg.type === 'currency_grant') {
-        const coins = Math.max(0, Math.round(Number(msg.coins) || 0));
-        const dna = Math.max(0, Math.round(Number(msg.dna) || 0));
-        if (coins > 0 || dna > 0) {
-          setProfile((prev) => ({
-            ...prev,
-            coins: prev.coins + coins,
-            dna: prev.dna + dna,
-          }));
-          setGrantNotice(TRANSLATIONS[langRef.current].receivedGrantNotice);
-          soundFX.playEatCell();
-        }
-      }
-    };
 
-    ws.onerror = () => {
-      if (pendingJoinRef.current) {
-        setConnecting(false);
-        setConnectionError(TRANSLATIONS[langRef.current].connectionLostText);
-      }
-    };
+        const pending = pendingJoinRef.current;
+        if (pending) {
+          pendingJoinRef.current = null;
+          engineRef.current?.setNetworkMode(true);
+          ws.send(
+            JSON.stringify({
+              type: 'join',
+              roomId: pending.effectiveConfig.roomId.trim() || 'global',
+              name: pending.effectiveConfig.nickname,
+              skinId: pending.effectiveConfig.skinId,
+              skinLevel: getSkinLevel(profileRef.current.skinLevels, pending.effectiveConfig.skinId),
+              mode: pending.effectiveConfig.mode,
+              startMassBonus: pending.useStartMassBoost ? 20 : 0,
+              uid: firebaseUserRef.current?.uid || '',
+              playerCode: playerCodeRef.current,
+              level: profileRef.current.level,
+            })
+          );
+        }
+      };
 
-    ws.onclose = () => {
-      if (wsRef.current === ws) {
-        wsRef.current = null;
-        connectionIdRef.current = '';
-        setConnecting(false);
-        if (engineRef.current?.isNetworkMode && (phaseRef.current === 'PLAYING' || phaseRef.current === 'PAUSED')) {
-          engineRef.current.setNetworkMode(false);
-          setConnectionError(TRANSLATIONS[langRef.current].connectionLostText);
+      ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return;
+        wsLastActivityRef.current = Date.now();
+
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+
+        if (msg.type === 'pong') {
+          setServerStatus('connected');
+          return;
+        }
+
+        if (msg.type === 'welcome') {
+          setServerStatus('connected');
+          connectionIdRef.current = typeof msg.connectionId === 'string' ? msg.connectionId : '';
+          if (msg.announcement && typeof msg.announcement === 'object') {
+            const ann = msg.announcement as OwnerAnnouncement;
+            if (typeof ann.text === 'string' && ann.text.trim()) {
+              setAnnouncement(ann);
+            }
+          }
+          sendPresenceUpdate(ws);
+        } else if (msg.type === 'announcement') {
+          if (msg.announcement && typeof msg.announcement === 'object') {
+            const ann = msg.announcement as OwnerAnnouncement;
+            setAnnouncement(typeof ann.text === 'string' && ann.text.trim() ? ann : null);
+          } else {
+            setAnnouncement(null);
+          }
+        } else if (msg.type === 'room_mode') {
+          if (
+            msg.mode === 'classic' ||
+            msg.mode === 'blitz' ||
+            msg.mode === 'relaxed' ||
+            msg.mode === 'merge'
+          ) {
+            const nextMode = msg.mode;
+            setConfig((prev) => ({ ...prev, mode: nextMode }));
+          }
+        } else if (msg.type === 'joined') {
+          clearJoinTimeout();
+          if (pendingStartMassBoostRef.current) {
+            pendingStartMassBoostRef.current = false;
+            setProfile((prev) => ({
+              ...prev,
+              boosts: {
+                ...prev.boosts,
+                startMassBoost: Math.max(0, prev.boosts.startMassBoost - 1),
+              },
+            }));
+          }
+
+          if (
+            msg.mode === 'classic' ||
+            msg.mode === 'blitz' ||
+            msg.mode === 'relaxed' ||
+            msg.mode === 'merge'
+          ) {
+            const roomMode = msg.mode;
+            const joinedRoomId = typeof msg.roomId === 'string' ? msg.roomId : configRef.current.roomId;
+            setConfig((prev) => ({
+              ...prev,
+              roomId: joinedRoomId,
+              mode: roomMode,
+            }));
+          }
+
+          setServerStatus('connected');
+          setConnecting(false);
+          setConnectionError(null);
+          setIsNewRecord(false);
+          setLastSummary(null);
+          setLastRewards(null);
+          setLastTokensEarned(0);
+          sessionBestRankRef.current = 0;
+          setSessionBestRank(0);
+          resetActiveTouches();
+          engineRef.current?.setPointerScreen(window.innerWidth / 2, window.innerHeight / 2);
+          setPhase('PLAYING');
+
+          // Auto-apply active owner powers upon entering an online match
+          const user = firebaseUserRef.current;
+          const p = ownerPowersRef.current;
+          if (
+            user &&
+            isVerifiedOwnerUser(user) &&
+            (p.godMode || p.virusShield || p.foodMagnet || p.autoFastMerge || p.speedMultiplier !== 1)
+          ) {
+            void user.getIdToken().then((token) =>
+              fetch('/api/admin/powers', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                  connectionId: connectionIdRef.current,
+                  powers: p,
+                }),
+              })
+            ).catch(() => {});
+          }
+        } else if (msg.type === 'state') {
+          const engine = engineRef.current;
+          if (engine && engine.isNetworkMode) {
+            const snap = engine.applyNetworkState(msg as unknown as NetStatePayload);
+            updateHudSnapshot(snap);
+          }
+        } else if (msg.type === 'died') {
+          soundFX.playGameOver();
+          const peakMass = Number(msg.peakMass) || 0;
+          const cellsEaten = Number(msg.cellsEaten) || 0;
+          const foodsEaten = Number(msg.foodsEaten) || 0;
+          const splitsUsed = Number(msg.splitsUsed) || 0;
+          const elapsedSeconds = Number(msg.elapsedSeconds) || 0;
+          const engine = engineRef.current;
+          const summary: HudSnapshot = {
+            ...(engine ? engine.getHudSnapshot() : hud),
+            peakMass,
+            cellsEaten,
+            foodsEaten,
+            splitsUsed,
+            elapsedSeconds,
+            score: Math.round(peakMass * 2 + cellsEaten * 85 + elapsedSeconds * 1.5),
+            killerName: typeof msg.killerName === 'string' ? msg.killerName : null,
+          };
+          engine?.setNetworkMode(false);
+          handlePlayerDeath(summary);
+        } else if (msg.type === 'kicked') {
+          clearJoinTimeout();
+          pendingStartMassBoostRef.current = false;
+          resetActiveTouches();
+          pendingJoinRef.current = null;
+          engineRef.current?.setNetworkMode(false);
+          setConnecting(false);
+          setCustomizerOpen(false);
+          setKickedNotice(TRANSLATIONS[langRef.current].kickedNotice);
           setPhase('MENU');
+        } else if (msg.type === 'banned') {
+          clearJoinTimeout();
+          pendingStartMassBoostRef.current = false;
+          resetActiveTouches();
+          pendingJoinRef.current = null;
+          engineRef.current?.setNetworkMode(false);
+          setConnecting(false);
+          setCustomizerOpen(false);
+          setKickedNotice(TRANSLATIONS[langRef.current].bannedNotice);
+          setPhase('MENU');
+        } else if (msg.type === 'currency_grant') {
+          const coins = Math.max(0, Math.round(Number(msg.coins) || 0));
+          const dna = Math.max(0, Math.round(Number(msg.dna) || 0));
+          if (coins > 0 || dna > 0) {
+            setProfile((prev) => ({
+              ...prev,
+              coins: prev.coins + coins,
+              dna: prev.dna + dna,
+            }));
+            setGrantNotice(TRANSLATIONS[langRef.current].receivedGrantNotice);
+            soundFX.playEatCell();
+          }
         }
-      }
-    };
+      };
+
+      ws.onerror = () => {
+        if (wsRef.current !== ws) return;
+        setServerStatus('offline');
+        if (pendingJoinRef.current) {
+          clearJoinTimeout();
+          pendingJoinRef.current = null;
+          pendingStartMassBoostRef.current = false;
+          engineRef.current?.setNetworkMode(false);
+          setConnecting(false);
+          setConnectionError(TRANSLATIONS[langRef.current].connectionLostText);
+        }
+      };
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+          connectionIdRef.current = '';
+          clearJoinTimeout();
+          pendingStartMassBoostRef.current = false;
+          setConnecting(false);
+          setServerStatus('offline');
+          if (
+            engineRef.current?.isNetworkMode &&
+            (phaseRef.current === 'PLAYING' || phaseRef.current === 'PAUSED')
+          ) {
+            engineRef.current.setNetworkMode(false);
+            setConnectionError(TRANSLATIONS[langRef.current].connectionLostText);
+            setPhase('MENU');
+          }
+        }
+      };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handlePlayerDeath, resetActiveTouches, sendPresenceUpdate]);
+    [clearJoinTimeout, handlePlayerDeath, resetActiveTouches, sendPresenceUpdate]
+  );
 
   useEffect(() => {
     connectPresenceSocket();
     const reconnectTimer = window.setInterval(() => {
-      if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+      const ws = wsRef.current;
+      const now = Date.now();
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
         connectPresenceSocket();
+        return;
+      }
+      if (ws.readyState === WebSocket.CONNECTING && now - wsConnectedAtRef.current > 6500) {
+        connectPresenceSocket(true);
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN) {
+        if (now - wsLastActivityRef.current > 45_000) {
+          connectPresenceSocket(true);
+          return;
+        }
+        if (now - wsLastActivityRef.current >= 16_000) {
+          try {
+            ws.send(JSON.stringify({ type: 'ping', ts: now }));
+          } catch {
+            connectPresenceSocket(true);
+          }
+        }
       }
     }, 3000);
 
     return () => {
+      clearJoinTimeout();
       window.clearInterval(reconnectTimer);
       const ws = wsRef.current;
       wsRef.current = null;
@@ -844,7 +1148,13 @@ export default function App() {
         }
       }
     };
-  }, [connectPresenceSocket]);
+  }, [clearJoinTimeout, connectPresenceSocket]);
+
+  const handleReconnectServer = useCallback(() => {
+    setConnectionError(null);
+    connectPresenceSocket(true);
+    void fetchRoomsNow();
+  }, [connectPresenceSocket, fetchRoomsNow]);
 
   // Keep server presence metadata synced whenever identity/skin/level changes
   useEffect(() => {
@@ -932,12 +1242,14 @@ export default function App() {
             triggerEject();
           }
           wHeldRef.current = true;
+          syncOnlineEjectHold();
         } else if (e.code === 'KeyE') {
           e.preventDefault();
           if (!e.repeat) {
             triggerFastEject();
           }
           fastEjectHeldRef.current = true;
+          syncOnlineEjectHold();
         } else if (e.code === 'Escape' || e.code === 'KeyP') {
           e.preventDefault();
           resetActiveTouches();
@@ -954,8 +1266,10 @@ export default function App() {
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code === 'KeyW') {
         wHeldRef.current = false;
+        syncOnlineEjectHold();
       } else if (e.code === 'KeyE') {
         fastEjectHeldRef.current = false;
+        syncOnlineEjectHold();
       }
     };
 
@@ -976,7 +1290,7 @@ export default function App() {
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [triggerSplit, triggerEject, triggerFastEject, resetActiveTouches]);
+  }, [triggerSplit, triggerEject, triggerFastEject, resetActiveTouches, syncOnlineEjectHold]);
 
   const handleChangeZoom = useCallback((next: number) => {
     const clamped = Math.max(0.55, Math.min(1.65, next));
@@ -1197,6 +1511,41 @@ export default function App() {
     soundFX.playEatCell();
   }, []);
 
+  const handleUpgradeSkin = useCallback((skinId: SkinId) => {
+    const skin = SKIN_MAP[skinId];
+    if (!skin?.isVip) return;
+    setProfile((prev) => {
+      if (!prev.unlockedSkins.includes(skinId)) return prev;
+      const currentLevel = getSkinLevel(prev.skinLevels, skinId);
+      if (currentLevel >= 3) return prev;
+      const nextLevel: SkinLevel = currentLevel === 1 ? 2 : 3;
+      const price =
+        nextLevel === 2
+          ? skin.upgradeLv2Price ?? 400
+          : skin.upgradeLv3Price ?? 40;
+      const currency =
+        nextLevel === 2
+          ? skin.upgradeLv2Currency ?? 'coins'
+          : skin.upgradeLv3Currency ?? 'dna';
+      if (currency === 'dna') {
+        if (prev.dna < price) return prev;
+        return {
+          ...prev,
+          dna: prev.dna - price,
+          skinLevels: { ...prev.skinLevels, [skinId]: nextLevel },
+        };
+      }
+      if (prev.coins < price) return prev;
+      return {
+        ...prev,
+        coins: prev.coins - price,
+        skinLevels: { ...prev.skinLevels, [skinId]: nextLevel },
+      };
+    });
+    setConfig((prev) => ({ ...prev, skinId }));
+    soundFX.playEatCell();
+  }, []);
+
   const handleEquipSkin = useCallback((skinId: SkinId) => {
     setConfig((prev) => ({ ...prev, skinId }));
   }, []);
@@ -1237,26 +1586,25 @@ export default function App() {
     soundFX.playEatCell();
   }, []);
 
-  const consumeStartMassBonus = useCallback((): number => {
-    if (profileRef.current.boosts.startMassBoost <= 0) return 0;
-    setProfile((prev) => ({
-      ...prev,
-      boosts: {
-        ...prev.boosts,
-        startMassBoost: Math.max(0, prev.boosts.startMassBoost - 1),
-      },
-    }));
-    return 20;
-  }, []);
-
   const startOnlineGame = useCallback(
-    (effectiveConfig: GameConfig, startMassBonus: number) => {
+    (effectiveConfig: GameConfig, useStartMassBoost: boolean) => {
       const engine = engineRef.current;
       if (!engine) return;
 
+      clearJoinTimeout();
       setConnecting(true);
       setConnectionError(null);
       setKickedNotice(null);
+      pendingStartMassBoostRef.current = useStartMassBoost;
+
+      joinTimeoutRef.current = window.setTimeout(() => {
+        pendingJoinRef.current = null;
+        pendingStartMassBoostRef.current = false;
+        engineRef.current?.setNetworkMode(false);
+        setConnecting(false);
+        setConnectionError(TRANSLATIONS[langRef.current].connectionTimeoutText);
+        connectPresenceSocket(true);
+      }, 8000);
 
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1268,20 +1616,29 @@ export default function App() {
             roomId: effectiveConfig.roomId.trim() || 'global',
             name: effectiveConfig.nickname,
             skinId: effectiveConfig.skinId,
+            skinLevel: getSkinLevel(profileRef.current.skinLevels, effectiveConfig.skinId),
             mode: effectiveConfig.mode,
-            startMassBonus,
+            startMassBonus: useStartMassBoost ? 20 : 0,
             uid: firebaseUserRef.current?.uid || '',
             playerCode: playerCodeRef.current,
             level: profileRef.current.level,
           })
         );
       } else {
-        pendingJoinRef.current = { effectiveConfig, startMassBonus };
-        connectPresenceSocket();
+        pendingJoinRef.current = { effectiveConfig, useStartMassBoost };
+        connectPresenceSocket(!ws || ws.readyState !== WebSocket.CONNECTING);
       }
     },
-    [connectPresenceSocket]
+    [clearJoinTimeout, connectPresenceSocket]
   );
+
+  const handleCancelOnlineConnect = useCallback(() => {
+    clearJoinTimeout();
+    pendingJoinRef.current = null;
+    pendingStartMassBoostRef.current = false;
+    engineRef.current?.setNetworkMode(false);
+    setConnecting(false);
+  }, [clearJoinTimeout]);
 
   const handleStartGame = useCallback(() => {
     const engine = engineRef.current;
@@ -1296,16 +1653,38 @@ export default function App() {
       skinId: safeSkin,
     };
 
-    const bonusMass = consumeStartMassBonus();
+    const hasStartBoost = profileRef.current.boosts.startMassBoost > 0;
 
     if (effectiveConfig.playType === 'online') {
-      startOnlineGame(effectiveConfig, bonusMass);
+      startOnlineGame(effectiveConfig, hasStartBoost);
       return;
+    }
+
+    const bonusMass = hasStartBoost ? 20 : 0;
+    if (hasStartBoost) {
+      setProfile((prev) => ({
+        ...prev,
+        boosts: {
+          ...prev.boosts,
+          startMassBoost: Math.max(0, prev.boosts.startMassBoost - 1),
+        },
+      }));
     }
 
     leaveOnlineMatch();
     engine.setNetworkMode(false);
-    engine.spawnPlayer(effectiveConfig, bonusMass);
+    engine.setOwnerPowers(isVerifiedOwnerUser(firebaseUserRef.current) ? ownerPowersRef.current : {
+      godMode: false,
+      virusShield: false,
+      speedMultiplier: 1,
+      foodMagnet: false,
+      autoFastMerge: false,
+    });
+    engine.spawnPlayer(
+      effectiveConfig,
+      bonusMass,
+      getSkinLevel(profileRef.current.skinLevels, effectiveConfig.skinId)
+    );
     sessionBestRankRef.current = 0;
     setSessionBestRank(0);
     updateHudSnapshot(engine.getHudSnapshot());
@@ -1322,7 +1701,6 @@ export default function App() {
     config,
     profile.unlockedSkins,
     t.defaultPlayerName,
-    consumeStartMassBonus,
     startOnlineGame,
     leaveOnlineMatch,
     resetActiveTouches,
@@ -1334,6 +1712,8 @@ export default function App() {
   }, []);
 
   const handleBackToMenu = useCallback(() => {
+    clearJoinTimeout();
+    pendingStartMassBoostRef.current = false;
     resetActiveTouches();
     leaveOnlineMatch();
     engineRef.current?.setNetworkMode(false);
@@ -1341,7 +1721,7 @@ export default function App() {
     setSessionBestRank(0);
     setConnecting(false);
     setPhase('MENU');
-  }, [leaveOnlineMatch, resetActiveTouches]);
+  }, [clearJoinTimeout, leaveOnlineMatch, resetActiveTouches]);
 
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -1440,29 +1820,38 @@ export default function App() {
   }, []);
 
   const handleSignInGoogle = useCallback(async (emailHint?: string) => {
+    const trimmedEmail = emailHint?.trim() || '';
+    if (trimmedEmail && !isValidEmailFormat(trimmedEmail)) {
+      setAuthError(TRANSLATIONS[langRef.current].authErrorInvalidEmailHint);
+      return;
+    }
+
     setAuthLoading(true);
     setAuthError(null);
+    setShowRedirectFallback(false);
     try {
-      const provider = new GoogleAuthProvider();
-      const trimmedEmail = emailHint?.trim();
-      if (trimmedEmail) {
-        provider.setCustomParameters({
-          prompt: 'select_account',
-          login_hint: trimmedEmail,
-        });
-      } else {
-        provider.setCustomParameters({ prompt: 'select_account' });
-      }
+      const provider = createGoogleProvider(trimmedEmail);
       await signInWithPopup(auth, provider);
     } catch (err: unknown) {
       const code =
         typeof err === 'object' && err !== null && 'code' in err
           ? String((err as { code?: unknown }).code)
           : '';
-      if (code === 'auth/popup-blocked') {
-        setAuthError(TRANSLATIONS[langRef.current].authErrorPopupBlocked);
-      } else if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
-        setAuthError(TRANSLATIONS[langRef.current].authErrorGeneric);
+      const tr = TRANSLATIONS[langRef.current];
+      if (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') {
+        setAuthError(tr.authErrorPopupBlocked);
+        setShowRedirectFallback(true);
+      } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setAuthError(tr.authErrorPopupClosed);
+        setShowRedirectFallback(true);
+      } else if (code === 'auth/unauthorized-domain') {
+        setAuthError(`${tr.authErrorUnauthorizedDomain} (${window.location.hostname})`);
+      } else if (code === 'auth/operation-not-allowed') {
+        setAuthError(tr.authErrorOperationNotAllowed);
+      } else if (code === 'auth/network-request-failed') {
+        setAuthError(tr.authErrorNetwork);
+      } else {
+        setAuthError(`${tr.authErrorGeneric}${code ? ` (${code})` : ''}`);
       }
       console.error('Google Sign-In failed:', err);
     } finally {
@@ -1470,11 +1859,36 @@ export default function App() {
     }
   }, []);
 
-  const handleSignOutGoogle = useCallback(async () => {
+  const handleSignInGoogleRedirect = useCallback(async (emailHint?: string) => {
+    const trimmedEmail = emailHint?.trim() || '';
+    if (trimmedEmail && !isValidEmailFormat(trimmedEmail)) {
+      setAuthError(TRANSLATIONS[langRef.current].authErrorInvalidEmailHint);
+      return;
+    }
     setAuthLoading(true);
     setAuthError(null);
     try {
+      const provider = createGoogleProvider(trimmedEmail);
+      await signInWithRedirect(auth, provider);
+    } catch (err: unknown) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      setAuthError(`${TRANSLATIONS[langRef.current].authErrorGeneric}${code ? ` (${code})` : ''}`);
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleSignOutGoogle = useCallback(async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    setShowRedirectFallback(false);
+    try {
       await signOut(auth);
+      cloudSyncedUidRef.current = null;
+      setAccountSyncStatus('idle');
+      setAccountSyncError(null);
       setOwnerMenuOpen(false);
     } catch (err) {
       console.error('Sign out failed:', err);
@@ -1483,25 +1897,27 @@ export default function App() {
     }
   }, []);
 
-  const handleAddFriend = useCallback(
-    (friend: FriendRecord) => {
-      setFriends((prev) => {
-        if (prev.some((f) => f.friendUid === friend.friendUid)) return prev;
-        return [...prev, friend];
-      });
-      if (firebaseUserRef.current) {
-        void addCloudFriend(firebaseUserRef.current.uid, friend).catch((err) =>
-          console.error('Add cloud friend failed:', err)
-        );
-      }
-      soundFX.playEatCell();
-    },
-    []
-  );
+  const handleAddFriend = useCallback((friend: FriendRecord) => {
+    setFriends((prev) => {
+      if (prev.some((f) => f.friendUid === friend.friendUid)) return prev;
+      return [...prev, friend];
+    });
+    const isRealCloudFriend =
+      Boolean(friend.friendUid) &&
+      !friend.friendUid.startsWith('code_') &&
+      /^RK[0-9A-Z]{6}$/.test(normalizePlayerCode(friend.playerCode));
+
+    if (firebaseUserRef.current && isRealCloudFriend) {
+      void addCloudFriend(firebaseUserRef.current.uid, friend).catch((err) =>
+        console.error('Add cloud friend failed:', err)
+      );
+    }
+    soundFX.playEatCell();
+  }, []);
 
   const handleRemoveFriend = useCallback((friendUid: string) => {
     setFriends((prev) => prev.filter((f) => f.friendUid !== friendUid));
-    if (firebaseUserRef.current) {
+    if (firebaseUserRef.current && friendUid && !friendUid.startsWith('code_')) {
       void removeCloudFriend(firebaseUserRef.current.uid, friendUid).catch((err) =>
         console.error('Remove cloud friend failed:', err)
       );
@@ -1522,10 +1938,10 @@ export default function App() {
       };
       setConfig((prev) => ({ ...prev, playType: 'online', roomId: targetRoom }));
       setAccountOpen(false);
-      const bonusMass = consumeStartMassBonus();
-      startOnlineGame(nextConfig, bonusMass);
+      const hasStartBoost = profileRef.current.boosts.startMassBoost > 0;
+      startOnlineGame(nextConfig, hasStartBoost);
     },
-    [consumeStartMassBonus, startOnlineGame]
+    [startOnlineGame]
   );
 
   // Exclusive Owner Admin Actions
@@ -1539,12 +1955,20 @@ export default function App() {
         fetch('/api/admin/players', {
           headers: { Authorization: `Bearer ${token}` },
         })
-          .then((r) => (r.ok ? r.json() : { players: [] }))
-          .catch(() => ({ players: [] })),
+          .then((r) =>
+            r.ok ? r.json() : { players: [], banned: [], announcement: null }
+          )
+          .catch(() => ({ players: [], banned: [], announcement: null })),
         adminFetchAllCloudPlayers().catch(() => []),
       ]);
       if (Array.isArray(liveRes.players)) {
         setLivePlayers(liveRes.players);
+      }
+      if (Array.isArray(liveRes.banned)) {
+        setBannedPlayers(liveRes.banned);
+      }
+      if ('announcement' in liveRes) {
+        setAnnouncement((liveRes.announcement as OwnerAnnouncement | null) ?? null);
       }
       setCloudPlayers(cloudList);
     } finally {
@@ -1567,6 +1991,99 @@ export default function App() {
       dna: prev.dna + Math.max(0, Math.round(dna)),
     }));
     soundFX.playEatCell();
+  }, []);
+
+  const handleAdminAddSelfXp = useCallback((xpAmount: number) => {
+    if (!isVerifiedOwnerUser(firebaseUserRef.current)) return;
+    const safeXp = Math.max(1, Math.round(xpAmount));
+    setProfile((prev) => applyXpGain(prev, safeXp).nextProfile);
+    soundFX.playEatCell();
+  }, []);
+
+  const handleAdminUnlockAllSkins = useCallback(() => {
+    if (!isVerifiedOwnerUser(firebaseUserRef.current)) return;
+    const allSkinIds = SKINS.map((s) => s.id);
+    const maxVipLevels: Partial<Record<SkinId, SkinLevel>> = {};
+    for (const s of SKINS) {
+      if (s.isVip) maxVipLevels[s.id] = 3;
+    }
+    setProfile((prev) => ({
+      ...prev,
+      unlockedSkins: Array.from(new Set([...prev.unlockedSkins, ...allSkinIds])),
+      skinLevels: { ...prev.skinLevels, ...maxVipLevels },
+    }));
+    soundFX.playEatCell();
+  }, []);
+
+  const handleAdminRefillBoosts = useCallback(() => {
+    if (!isVerifiedOwnerUser(firebaseUserRef.current)) return;
+    setProfile((prev) => ({
+      ...prev,
+      boosts: {
+        levelBoost2x: prev.boosts.levelBoost2x + 10,
+        levelBoost3x: prev.boosts.levelBoost3x + 10,
+        coinBoost2x: prev.boosts.coinBoost2x + 10,
+        startMassBoost: prev.boosts.startMassBoost + 10,
+      },
+    }));
+    soundFX.playEatCell();
+  }, []);
+
+  const handleAdminChangePowers = useCallback(async (next: OwnerPowers) => {
+    const user = firebaseUserRef.current;
+    if (!isVerifiedOwnerUser(user) || !user) return;
+    setOwnerPowers(next);
+    ownerPowersRef.current = next;
+    engineRef.current?.setOwnerPowers(next);
+
+    if (engineRef.current?.isNetworkMode) {
+      try {
+        const token = await user.getIdToken();
+        await fetch('/api/admin/powers', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            connectionId: connectionIdRef.current,
+            powers: next,
+          }),
+        });
+      } catch {
+        // Ignore transient network errors
+      }
+    }
+  }, []);
+
+  const handleAdminInstantMerge = useCallback(async (): Promise<boolean> => {
+    const user = firebaseUserRef.current;
+    if (!isVerifiedOwnerUser(user) || !user) return false;
+    const engine = engineRef.current;
+    if (!engine) return false;
+    if (!engine.isNetworkMode) {
+      const ok = engine.instantMergePlayer();
+      if (ok) soundFX.playEatCell();
+      return ok;
+    }
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch('/api/admin/powers', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          connectionId: connectionIdRef.current,
+          instantMerge: true,
+        }),
+      });
+      if (res.ok) soundFX.playEatCell();
+      return res.ok;
+    } catch {
+      return false;
+    }
   }, []);
 
   const handleAdminBoostMass = useCallback(async (amount: number): Promise<boolean> => {
@@ -1606,6 +2123,82 @@ export default function App() {
     }
   }, []);
 
+  const handleAdminArenaAction = useCallback(
+    async (
+      action:
+        | 'golden_rain'
+        | 'spawn_bots'
+        | 'reset_bots'
+        | 'set_mode'
+        | 'broadcast'
+        | 'clear_broadcast',
+      payload?: { mode?: GameMode; text?: string }
+    ): Promise<boolean> => {
+      const user = firebaseUserRef.current;
+      if (!isVerifiedOwnerUser(user) || !user) return false;
+      const engine = engineRef.current;
+
+      if (
+        action !== 'broadcast' &&
+        action !== 'clear_broadcast' &&
+        engine &&
+        !engine.isNetworkMode
+      ) {
+        if (action === 'golden_rain') {
+          engine.spawnGoldenFoodRain(40);
+          soundFX.playEatCell();
+          return true;
+        }
+        if (action === 'spawn_bots') {
+          engine.spawnExtraBots(5);
+          return true;
+        }
+        if (action === 'reset_bots') {
+          engine.resetArenaBots();
+          return true;
+        }
+        if (action === 'set_mode' && payload?.mode) {
+          const m = payload.mode;
+          setConfig((prev) => ({ ...prev, mode: m }));
+          return true;
+        }
+      }
+
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch('/api/admin/arena', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            action,
+            connectionId: connectionIdRef.current,
+            mode: payload?.mode,
+            text: payload?.text,
+          }),
+        });
+        if (!res.ok) return false;
+        const data = (await res.json()) as {
+          announcement?: OwnerAnnouncement | null;
+          mode?: GameMode;
+        };
+        if (action === 'broadcast' || action === 'clear_broadcast') {
+          setAnnouncement(data.announcement ?? null);
+        }
+        if (action === 'set_mode' && data.mode) {
+          setConfig((prev) => ({ ...prev, mode: data.mode! }));
+        }
+        soundFX.playEatCell();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
   const handleAdminKickPlayer = useCallback(
     async (target: { connectionId?: string; playerCode?: string }): Promise<boolean> => {
       const user = firebaseUserRef.current;
@@ -1621,6 +2214,40 @@ export default function App() {
           body: JSON.stringify(target),
         });
         return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
+  const handleAdminModeratePlayer = useCallback(
+    async (
+      action: 'ban' | 'unban' | 'halve_mass' | 'pull_to_me',
+      target: { connectionId?: string; uid?: string; playerCode?: string; name?: string }
+    ): Promise<boolean> => {
+      const user = firebaseUserRef.current;
+      if (!isVerifiedOwnerUser(user) || !user) return false;
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch('/api/admin/moderate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            action,
+            ...target,
+            ownerConnectionId: connectionIdRef.current,
+          }),
+        });
+        if (!res.ok) return false;
+        const data = (await res.json()) as { banned?: BannedPlayerRecord[] };
+        if (Array.isArray(data.banned)) {
+          setBannedPlayers(data.banned);
+        }
+        return true;
       } catch {
         return false;
       }
@@ -1664,6 +2291,50 @@ export default function App() {
           );
         }
         return true;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
+  const handleAdminGrantLiveMass = useCallback(
+    async (connectionId: string, amount: number): Promise<boolean> => {
+      const user = firebaseUserRef.current;
+      if (!isVerifiedOwnerUser(user) || !user) return false;
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch('/api/admin/grant-mass', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ connectionId, amount }),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
+  const handleAdminGrantAllOnline = useCallback(
+    async (coins: number, dna: number): Promise<boolean> => {
+      const user = firebaseUserRef.current;
+      if (!isVerifiedOwnerUser(user) || !user) return false;
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch('/api/admin/grant-all', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ coins, dna }),
+        });
+        return res.ok;
       } catch {
         return false;
       }
@@ -1734,20 +2405,26 @@ export default function App() {
           onOpenCustomizer={handleOpenCustomizer}
           isOwner={isOwner}
           onOpenOwnerMenu={handleOpenOwnerMenu}
+          announcement={announcement}
+          onDismissAnnouncement={() => setAnnouncement(null)}
           onSplit={triggerSplit}
           onEjectStart={() => {
             triggerEject();
             wHeldRef.current = true;
+            syncOnlineEjectHold();
           }}
           onEjectEnd={() => {
             wHeldRef.current = false;
+            syncOnlineEjectHold();
           }}
           onFastEjectStart={() => {
             triggerFastEject();
             fastEjectHeldRef.current = true;
+            syncOnlineEjectHold();
           }}
           onFastEjectEnd={() => {
             fastEjectHeldRef.current = false;
+            syncOnlineEjectHold();
           }}
         />
       )}
@@ -1765,8 +2442,11 @@ export default function App() {
           lastRewards={lastRewards}
           lastTokensEarned={lastTokensEarned}
           rooms={rooms}
+          serverStatus={serverStatus}
           connecting={connecting}
           connectionError={connectionError}
+          onReconnectServer={handleReconnectServer}
+          onCancelConnect={handleCancelOnlineConnect}
           passClaimableCount={passClaimableCount}
           eventBadgeCount={eventBadgeCount}
           playerCode={playerCode}
@@ -1774,13 +2454,25 @@ export default function App() {
           firebaseUser={firebaseUser}
           authLoading={authLoading}
           authError={authError}
+          showRedirectFallback={showRedirectFallback}
+          accountSyncStatus={accountSyncStatus}
+          accountSyncError={accountSyncError}
           onSignInGoogle={(emailHint) => void handleSignInGoogle(emailHint)}
+          onSignInGoogleRedirect={(emailHint) => void handleSignInGoogleRedirect(emailHint)}
           onSignOut={() => void handleSignOutGoogle()}
-          onClearAuthError={() => setAuthError(null)}
+          onClearAuthError={() => {
+            setAuthError(null);
+            setShowRedirectFallback(false);
+          }}
+          onRetryAccountSync={() => {
+            if (firebaseUser) void syncCloudAccountForUser(firebaseUser);
+          }}
           kickedNotice={kickedNotice}
           onDismissKickedNotice={() => setKickedNotice(null)}
           grantNotice={grantNotice}
           onDismissGrantNotice={() => setGrantNotice(null)}
+          announcement={announcement}
+          onDismissAnnouncement={() => setAnnouncement(null)}
           onChangeConfig={handleChangeConfig}
           onToggleLanguage={handleToggleLanguage}
           onOpenShop={handleOpenShop}
@@ -1816,6 +2508,7 @@ export default function App() {
         lang={lang}
         t={t}
         onBuySkin={handleBuySkin}
+        onUpgradeSkin={handleUpgradeSkin}
         onEquipSkin={handleEquipSkin}
         onBuyBoost={handleBuyBoost}
         onOpenGamePass={() => setGamePassOpen(true)}
@@ -1852,6 +2545,9 @@ export default function App() {
         firebaseUser={firebaseUser}
         authLoading={authLoading}
         authError={authError}
+        showRedirectFallback={showRedirectFallback}
+        accountSyncStatus={accountSyncStatus}
+        accountSyncError={accountSyncError}
         playerCode={playerCode}
         friends={friends}
         config={config}
@@ -1860,8 +2556,15 @@ export default function App() {
         lang={lang}
         t={t}
         onSignInGoogle={(emailHint) => void handleSignInGoogle(emailHint)}
+        onSignInGoogleRedirect={(emailHint) => void handleSignInGoogleRedirect(emailHint)}
         onSignOut={() => void handleSignOutGoogle()}
-        onClearAuthError={() => setAuthError(null)}
+        onClearAuthError={() => {
+          setAuthError(null);
+          setShowRedirectFallback(false);
+        }}
+        onRetryAccountSync={() => {
+          if (firebaseUser) void syncCloudAccountForUser(firebaseUser);
+        }}
         onAddFriend={handleAddFriend}
         onRemoveFriend={handleRemoveFriend}
         onJoinFriendRoom={handleJoinFriendRoom}
@@ -1873,14 +2576,28 @@ export default function App() {
           onClose={() => setOwnerMenuOpen(false)}
           livePlayers={livePlayers}
           cloudPlayers={cloudPlayers}
+          bannedPlayers={bannedPlayers}
+          activeAnnouncement={announcement}
+          ownerPowers={ownerPowers}
+          currentMode={config.mode}
           loadingPlayers={loadingAdminPlayers}
           inMatch={phase === 'PLAYING' || phase === 'PAUSED'}
+          isOnlineMatch={Boolean(engineRef.current?.isNetworkMode)}
           t={t}
           onRefreshPlayers={() => void handleRefreshAdminPlayers()}
           onAddSelfCurrency={handleAdminAddSelfCurrency}
+          onAddSelfXp={handleAdminAddSelfXp}
+          onUnlockAllSkins={handleAdminUnlockAllSkins}
+          onRefillAllBoosts={handleAdminRefillBoosts}
+          onChangeOwnerPowers={handleAdminChangePowers}
+          onInstantMerge={handleAdminInstantMerge}
           onBoostMyMass={handleAdminBoostMass}
+          onArenaAction={handleAdminArenaAction}
           onKickPlayer={handleAdminKickPlayer}
+          onModeratePlayer={handleAdminModeratePlayer}
           onGrantPlayerCurrency={handleAdminGrantPlayer}
+          onGrantLiveMass={handleAdminGrantLiveMass}
+          onGrantAllOnline={handleAdminGrantAllOnline}
         />
       )}
 
@@ -1891,9 +2608,16 @@ export default function App() {
         loading={loadingWeeklyTop}
         firebaseUser={firebaseUser}
         authLoading={authLoading}
+        authError={authError}
+        showRedirectFallback={showRedirectFallback}
         t={t}
         onRefresh={() => void refreshWeeklyTop()}
         onSignInGoogle={() => void handleSignInGoogle()}
+        onSignInGoogleRedirect={() => void handleSignInGoogleRedirect()}
+        onClearAuthError={() => {
+          setAuthError(null);
+          setShowRedirectFallback(false);
+        }}
       />
     </main>
   );

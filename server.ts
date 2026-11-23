@@ -5,7 +5,16 @@ import { fileURLToPath } from 'url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ServerArena, WORLD_SIZE } from './src/game/serverEngine.ts';
-import type { GameMode, LiveServerPlayer, RoomSummary, SkinId } from './src/game/types.ts';
+import type {
+  BannedPlayerRecord,
+  GameMode,
+  LiveServerPlayer,
+  OwnerAnnouncement,
+  OwnerPowers,
+  RoomSummary,
+  SkinId,
+  SkinLevel,
+} from './src/game/types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,17 +34,38 @@ try {
 
 interface ConnectedClient {
   ws: WebSocket;
+  isAlive: boolean;
   playerId: string;
   uid: string;
   playerCode: string;
   name: string;
   skinId: SkinId;
+  skinLevel: SkinLevel;
   level: number;
   roomId: string | null;
 }
 
 const connectedClients = new Map<string, ConnectedClient>();
 const verifiedTokenCache = new Map<string, { uid: string; email: string; expiresAt: number }>();
+const bannedPlayers = new Map<string, BannedPlayerRecord>();
+let currentAnnouncement: OwnerAnnouncement | null = null;
+
+function isClientBanned(uid: string, playerCode: string): boolean {
+  if (uid && bannedPlayers.has(`uid:${uid}`)) return true;
+  if (playerCode && bannedPlayers.has(`code:${playerCode}`)) return true;
+  return false;
+}
+
+function findOwnerClient(adminUid: string, preferredConnId?: string): ConnectedClient | undefined {
+  if (preferredConnId) {
+    const c = connectedClients.get(preferredConnId);
+    if (c && c.uid === adminUid && c.roomId) return c;
+  }
+  for (const c of connectedClients.values()) {
+    if (c.uid === adminUid && c.roomId) return c;
+  }
+  return undefined;
+}
 
 async function verifyOwnerToken(authHeader: string | undefined): Promise<{ uid: string; email: string } | null> {
   if (!authHeader || !authHeader.startsWith('Bearer ') || !FIREBASE_API_KEY) return null;
@@ -105,6 +135,7 @@ const DEFAULT_ROOMS: { id: string; mode: GameMode }[] = [
   { id: 'kurdistan', mode: 'classic' },
   { id: 'blitz', mode: 'blitz' },
   { id: 'merge', mode: 'merge' },
+  { id: 'relaxed', mode: 'relaxed' },
 ];
 
 const rooms = new Map<string, RoomInstance>();
@@ -163,16 +194,29 @@ function leaveCurrentRoom(client: ConnectedClient) {
 
 function sendJson(ws: WebSocket, payload: unknown) {
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(payload));
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch {
+      // Ignore send error on closing socket
+    }
   }
 }
 
 async function startServer() {
   const app = express();
   app.use(express.json());
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    next();
+  });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, rooms: rooms.size });
+    res.json({
+      ok: true,
+      rooms: rooms.size,
+      connectedClients: connectedClients.size,
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
   });
 
   app.get('/api/rooms', (_req, res) => {
@@ -200,7 +244,11 @@ async function startServer() {
       res.status(403).json({ error: 'FORBIDDEN' });
       return;
     }
-    res.json({ players: getLivePlayersSnapshot() });
+    res.json({
+      players: getLivePlayersSnapshot(),
+      banned: Array.from(bannedPlayers.values()),
+      announcement: currentAnnouncement,
+    });
   });
 
   app.post('/api/admin/kick', async (req, res) => {
@@ -319,6 +367,288 @@ async function startServer() {
     res.json({ boosted: true, newMass });
   });
 
+  app.post('/api/admin/powers', async (req, res) => {
+    const admin = await verifyOwnerToken(req.headers.authorization);
+    if (!admin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+
+    const connectionId =
+      typeof req.body?.connectionId === 'string' ? req.body.connectionId.trim() : '';
+    const instantMerge = Boolean(req.body?.instantMerge);
+    const rawPowers = req.body?.powers as Partial<OwnerPowers> | undefined;
+
+    const ownerClient = findOwnerClient(admin.uid, connectionId);
+    if (!ownerClient || !ownerClient.roomId) {
+      res.status(404).json({ error: 'OWNER_NOT_IN_ONLINE_MATCH' });
+      return;
+    }
+    const room = rooms.get(ownerClient.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'ROOM_NOT_FOUND' });
+      return;
+    }
+
+    if (instantMerge) {
+      room.arena.instantMergeHuman(ownerClient.playerId);
+    }
+
+    if (rawPowers && typeof rawPowers === 'object') {
+      const speedVal = rawPowers.speedMultiplier;
+      const safePowers: OwnerPowers = {
+        godMode: Boolean(rawPowers.godMode),
+        virusShield: Boolean(rawPowers.virusShield),
+        speedMultiplier: speedVal === 1.5 || speedVal === 2.2 ? speedVal : 1,
+        foodMagnet: Boolean(rawPowers.foodMagnet),
+        autoFastMerge: Boolean(rawPowers.autoFastMerge),
+      };
+      room.arena.setHumanOwnerPowers(ownerClient.playerId, safePowers);
+    }
+
+    res.json({ ok: true });
+  });
+
+  app.post('/api/admin/arena', async (req, res) => {
+    const admin = await verifyOwnerToken(req.headers.authorization);
+    if (!admin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+
+    const action = typeof req.body?.action === 'string' ? req.body.action : '';
+    const connectionId =
+      typeof req.body?.connectionId === 'string' ? req.body.connectionId.trim() : '';
+
+    if (action === 'broadcast') {
+      const rawText = typeof req.body?.text === 'string' ? req.body.text.trim().slice(0, 140) : '';
+      if (!rawText) {
+        res.status(400).json({ error: 'EMPTY_ANNOUNCEMENT' });
+        return;
+      }
+      currentAnnouncement = {
+        id: `ann_${Date.now()}`,
+        text: rawText,
+        createdAt: Date.now(),
+      };
+      for (const client of connectedClients.values()) {
+        sendJson(client.ws, { type: 'announcement', announcement: currentAnnouncement });
+      }
+      res.json({ ok: true, announcement: currentAnnouncement });
+      return;
+    }
+
+    if (action === 'clear_broadcast') {
+      currentAnnouncement = null;
+      for (const client of connectedClients.values()) {
+        sendJson(client.ws, { type: 'announcement', announcement: null });
+      }
+      res.json({ ok: true, announcement: null });
+      return;
+    }
+
+    const ownerClient = findOwnerClient(admin.uid, connectionId);
+    if (!ownerClient || !ownerClient.roomId) {
+      res.status(404).json({ error: 'OWNER_NOT_IN_ONLINE_MATCH' });
+      return;
+    }
+    const room = rooms.get(ownerClient.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'ROOM_NOT_FOUND' });
+      return;
+    }
+
+    if (action === 'golden_rain') {
+      room.arena.spawnGoldenFoodRain(40, ownerClient.playerId);
+      res.json({ ok: true });
+      return;
+    }
+    if (action === 'spawn_bots') {
+      room.arena.spawnExtraBots(5);
+      res.json({ ok: true });
+      return;
+    }
+    if (action === 'reset_bots') {
+      room.arena.resetBots();
+      res.json({ ok: true });
+      return;
+    }
+    if (action === 'set_mode') {
+      const nextMode: GameMode =
+        req.body?.mode === 'blitz' ||
+        req.body?.mode === 'relaxed' ||
+        req.body?.mode === 'merge'
+          ? req.body.mode
+          : 'classic';
+      room.arena.setMode(nextMode);
+      for (const c of room.clients.values()) {
+        sendJson(c.ws, { type: 'room_mode', roomId: room.id, mode: nextMode });
+      }
+      res.json({ ok: true, mode: nextMode });
+      return;
+    }
+
+    res.status(400).json({ error: 'UNKNOWN_ACTION' });
+  });
+
+  app.post('/api/admin/moderate', async (req, res) => {
+    const admin = await verifyOwnerToken(req.headers.authorization);
+    if (!admin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+
+    const action = typeof req.body?.action === 'string' ? req.body.action : '';
+    const connectionId =
+      typeof req.body?.connectionId === 'string' ? req.body.connectionId.trim() : '';
+    const targetUid = typeof req.body?.uid === 'string' ? req.body.uid.trim() : '';
+    const targetCode =
+      typeof req.body?.playerCode === 'string'
+        ? req.body.playerCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+        : '';
+    const targetName = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 24) : 'Player';
+
+    if (action === 'ban') {
+      if (targetUid && targetUid === admin.uid) {
+        res.status(400).json({ error: 'CANNOT_BAN_SELF' });
+        return;
+      }
+      if (!targetCode && !targetUid && !connectionId) {
+        res.status(400).json({ error: 'MISSING_TARGET' });
+        return;
+      }
+
+      let resolvedCode = targetCode;
+      let resolvedUid = targetUid;
+      let resolvedName = targetName;
+
+      if (connectionId) {
+        const live = connectedClients.get(connectionId);
+        if (live) {
+          if (live.uid === admin.uid) {
+            res.status(400).json({ error: 'CANNOT_BAN_SELF' });
+            return;
+          }
+          resolvedCode = resolvedCode || live.playerCode;
+          resolvedUid = resolvedUid || live.uid;
+          resolvedName = live.name || resolvedName;
+        }
+      }
+
+      const key = resolvedCode ? `code:${resolvedCode}` : `uid:${resolvedUid}`;
+      bannedPlayers.set(key, {
+        playerCode: resolvedCode,
+        uid: resolvedUid,
+        name: resolvedName,
+      });
+
+      for (const client of connectedClients.values()) {
+        if (client.uid === admin.uid) continue;
+        const matchConn = connectionId && client.playerId === connectionId;
+        const matchCode = resolvedCode && client.playerCode === resolvedCode;
+        const matchUid = resolvedUid && client.uid === resolvedUid;
+        if (matchConn || matchCode || matchUid) {
+          leaveCurrentRoom(client);
+          sendJson(client.ws, { type: 'banned', reason: 'owner_ban' });
+        }
+      }
+      res.json({ ok: true, banned: Array.from(bannedPlayers.values()) });
+      return;
+    }
+
+    if (action === 'unban') {
+      if (targetCode) bannedPlayers.delete(`code:${targetCode}`);
+      if (targetUid) bannedPlayers.delete(`uid:${targetUid}`);
+      res.json({ ok: true, banned: Array.from(bannedPlayers.values()) });
+      return;
+    }
+
+    const targetClient = connectionId ? connectedClients.get(connectionId) : undefined;
+    if (!targetClient || !targetClient.roomId) {
+      res.status(404).json({ error: 'TARGET_NOT_IN_MATCH' });
+      return;
+    }
+    const targetRoom = rooms.get(targetClient.roomId);
+    if (!targetRoom) {
+      res.status(404).json({ error: 'ROOM_NOT_FOUND' });
+      return;
+    }
+
+    if (action === 'halve_mass') {
+      const newMass = targetRoom.arena.halveHumanMass(targetClient.playerId);
+      res.json({ ok: newMass > 0, newMass });
+      return;
+    }
+
+    if (action === 'pull_to_me') {
+      const ownerConnId =
+        typeof req.body?.ownerConnectionId === 'string' ? req.body.ownerConnectionId.trim() : '';
+      const ownerClient = findOwnerClient(admin.uid, ownerConnId);
+      if (!ownerClient || ownerClient.roomId !== targetClient.roomId) {
+        res.status(400).json({ error: 'NOT_IN_SAME_ROOM' });
+        return;
+      }
+      const ok = targetRoom.arena.pullHumanToOwner(targetClient.playerId, ownerClient.playerId);
+      res.json({ ok });
+      return;
+    }
+
+    res.status(400).json({ error: 'UNKNOWN_ACTION' });
+  });
+
+  app.post('/api/admin/grant-mass', async (req, res) => {
+    const admin = await verifyOwnerToken(req.headers.authorization);
+    if (!admin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+    const connectionId =
+      typeof req.body?.connectionId === 'string' ? req.body.connectionId.trim() : '';
+    const amount = Math.max(10, Math.min(50_000, Math.round(Number(req.body?.amount) || 0)));
+    const targetClient = connectionId ? connectedClients.get(connectionId) : undefined;
+    if (!targetClient || !targetClient.roomId) {
+      res.status(404).json({ error: 'TARGET_NOT_IN_MATCH' });
+      return;
+    }
+    const room = rooms.get(targetClient.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'ROOM_NOT_FOUND' });
+      return;
+    }
+    const newMass = room.arena.addHumanMass(targetClient.playerId, amount);
+    if (newMass <= 0) {
+      res.status(400).json({ error: 'PLAYER_NOT_ALIVE' });
+      return;
+    }
+    res.json({ ok: true, newMass });
+  });
+
+  app.post('/api/admin/grant-all', async (req, res) => {
+    const admin = await verifyOwnerToken(req.headers.authorization);
+    if (!admin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+    const coins = Math.max(0, Math.min(10_000_000, Math.round(Number(req.body?.coins) || 0)));
+    const dna = Math.max(0, Math.min(10_000_000, Math.round(Number(req.body?.dna) || 0)));
+    if (coins === 0 && dna === 0) {
+      res.status(400).json({ error: 'INVALID_AMOUNT' });
+      return;
+    }
+    let delivered = 0;
+    for (const client of connectedClients.values()) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      sendJson(client.ws, {
+        type: 'currency_grant',
+        coins,
+        dna,
+        fromOwner: true,
+      });
+      delivered += 1;
+    }
+    res.json({ ok: true, delivered });
+  });
+
   const httpServer = http.createServer(app);
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
@@ -327,19 +657,30 @@ async function startServer() {
     const playerId = `player_${clientSeq}_${Math.random().toString(36).slice(2, 6)}`;
     const client: ConnectedClient = {
       ws,
+      isAlive: true,
       playerId,
       uid: '',
       playerCode: '',
       name: 'یاریزان',
       skinId: 'kurdish_sun',
+      skinLevel: 1,
       level: 1,
       roomId: null,
     };
     connectedClients.set(playerId, client);
 
-    sendJson(ws, { type: 'welcome', connectionId: playerId });
+    ws.on('pong', () => {
+      client.isAlive = true;
+    });
+
+    sendJson(ws, {
+      type: 'welcome',
+      connectionId: playerId,
+      announcement: currentAnnouncement,
+    });
 
     ws.on('message', (raw) => {
+      client.isAlive = true;
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(String(raw));
@@ -349,7 +690,12 @@ async function startServer() {
 
       const type = msg.type;
 
-      if (type === 'presence') {
+      if (type === 'ping') {
+        sendJson(ws, {
+          type: 'pong',
+          ts: typeof msg.ts === 'number' ? msg.ts : Date.now(),
+        });
+      } else if (type === 'presence') {
         if (typeof msg.uid === 'string') client.uid = msg.uid.slice(0, 128);
         if (typeof msg.playerCode === 'string') {
           client.playerCode = msg.playerCode
@@ -364,6 +710,9 @@ async function startServer() {
         if (typeof msg.skinId === 'string') {
           client.skinId = msg.skinId as SkinId;
         }
+        if (msg.skinLevel === 3 || msg.skinLevel === 2 || msg.skinLevel === 1) {
+          client.skinLevel = msg.skinLevel;
+        }
         if (typeof msg.level === 'number' && msg.level >= 1) {
           client.level = Math.floor(msg.level);
         }
@@ -376,6 +725,7 @@ async function startServer() {
             : 'classic';
         const name = typeof msg.name === 'string' ? msg.name : 'یاریزان';
         const skinId = (typeof msg.skinId === 'string' ? msg.skinId : 'kurdish_sun') as SkinId;
+        const skinLevel: SkinLevel = msg.skinLevel === 3 ? 3 : msg.skinLevel === 2 ? 2 : 1;
         const startMassBonus = typeof msg.startMassBonus === 'number' ? msg.startMassBonus : 0;
 
         if (typeof msg.uid === 'string') client.uid = msg.uid.slice(0, 128);
@@ -391,16 +741,23 @@ async function startServer() {
         }
         client.name = name.trim().slice(0, 24) || 'یاریزان';
         client.skinId = skinId;
+        client.skinLevel = skinLevel;
+
+        if (isClientBanned(client.uid, client.playerCode)) {
+          sendJson(ws, { type: 'banned', reason: 'owner_ban' });
+          return;
+        }
 
         const room = getOrCreateRoom(roomId, mode);
         client.roomId = room.id;
         room.clients.set(playerId, client);
-        room.arena.addHuman(playerId, name, skinId, startMassBonus);
+        room.arena.addHuman(playerId, name, skinId, startMassBonus, skinLevel);
 
         sendJson(ws, {
           type: 'joined',
           playerId,
           roomId: room.id,
+          mode: room.arena.mode,
           worldSize: WORLD_SIZE,
         });
 
@@ -414,6 +771,7 @@ async function startServer() {
         if (!room) return;
         const tx = Number(msg.targetX);
         const ty = Number(msg.targetY);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
         const stop = Boolean(msg.stop);
         room.arena.setHumanInput(playerId, tx, ty, stop);
       } else if (type === 'split') {
@@ -423,6 +781,10 @@ async function startServer() {
         if (!client.roomId) return;
         const burst = typeof msg.count === 'number' ? Math.max(1, Math.min(3, Math.round(msg.count))) : 1;
         rooms.get(client.roomId)?.arena.ejectHuman(playerId, burst);
+      } else if (type === 'eject_hold') {
+        if (!client.roomId) return;
+        const mode = msg.mode === 'fast' || msg.mode === 'normal' ? msg.mode : 'off';
+        rooms.get(client.roomId)?.arena.setHumanEjectMode(playerId, mode);
       } else if (type === 'leave') {
         leaveCurrentRoom(client);
       }
@@ -438,6 +800,28 @@ async function startServer() {
       connectedClients.delete(playerId);
     });
   });
+
+  // 20s WebSocket heartbeat to keep Cloud Run / proxy connections alive and reap dead sockets
+  setInterval(() => {
+    for (const [id, client] of connectedClients.entries()) {
+      if (!client.isAlive || client.ws.readyState !== WebSocket.OPEN) {
+        leaveCurrentRoom(client);
+        connectedClients.delete(id);
+        try {
+          client.ws.terminate();
+        } catch {
+          // Ignore terminate error
+        }
+        continue;
+      }
+      client.isAlive = false;
+      try {
+        client.ws.ping();
+      } catch {
+        // Ignore ping error
+      }
+    }
+  }, 20_000);
 
   // 25 Hz authoritative simulation tick for active rooms
   const TICK_MS = 40;
@@ -463,6 +847,7 @@ async function startServer() {
             elapsedSeconds: death.elapsedSeconds,
             killerName: death.killerName,
           });
+          leaveCurrentRoom(client);
         }
       }
 

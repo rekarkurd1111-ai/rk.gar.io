@@ -7,13 +7,16 @@ import type {
   LeaderboardEntry,
   MinimapDot,
   NetStatePayload,
+  OwnerPowers,
   SkinId,
+  SkinLevel,
   Virus,
 } from './types.ts';
 
 export const WORLD_SIZE = 4200;
 const MAX_CELLS_PER_OWNER = 16;
 const MAX_CELL_MASS = 25000;
+const MAX_EJECTED_COUNT = 260;
 const TARGET_FOOD_COUNT = 600;
 const TARGET_BOT_COUNT = 32;
 const TARGET_VIRUS_COUNT = 22;
@@ -83,9 +86,12 @@ export interface HumanSession {
   id: string;
   name: string;
   skinId: SkinId;
+  skinLevel: SkinLevel;
   targetX: number;
   targetY: number;
   stopped?: boolean;
+  ejectMode: 'off' | 'normal' | 'fast';
+  ejectAccum: number;
   peakMass: number;
   cellsEaten: number;
   foodsEaten: number;
@@ -93,6 +99,7 @@ export interface HumanSession {
   elapsedSeconds: number;
   alive: boolean;
   killerName: string | null;
+  ownerPowers?: OwnerPowers;
 }
 
 export interface DeathNotification {
@@ -115,7 +122,7 @@ function massToRadius(mass: number): number {
 
 export class ServerArena {
   public readonly roomId: string;
-  public readonly mode: GameMode;
+  public mode: GameMode;
 
   public cells: Cell[] = [];
   public foods: FoodPellet[] = [];
@@ -159,7 +166,8 @@ export class ServerArena {
     playerId: string,
     name: string,
     skinId: SkinId,
-    startMassBonus = 0
+    startMassBonus = 0,
+    skinLevel: SkinLevel = 1
   ): HumanSession {
     this.removeHumanCells(playerId);
 
@@ -169,14 +177,18 @@ export class ServerArena {
     const startMass = baseStartMass + bonus;
     const cleanName = name.trim().slice(0, 16) || 'یاریزان';
     const validSkin: SkinId = SKIN_MAP[skinId] ? skinId : 'kurdish_sun';
+    const validLevel: SkinLevel = skinLevel === 3 ? 3 : skinLevel === 2 ? 2 : 1;
 
     const session: HumanSession = {
       id: playerId,
       name: cleanName,
       skinId: validSkin,
+      skinLevel: validLevel,
       targetX: safePos.x,
       targetY: safePos.y,
       stopped: false,
+      ejectMode: 'off',
+      ejectAccum: 0,
       peakMass: startMass,
       cellsEaten: 0,
       foodsEaten: 0,
@@ -195,6 +207,7 @@ export class ServerArena {
       isPlayer: false,
       isHuman: true,
       skinId: validSkin,
+      skinLevel: validLevel,
       x: safePos.x,
       y: safePos.y,
       vx: 0,
@@ -249,6 +262,102 @@ export class ServerArena {
     return rounded;
   }
 
+  public setMode(mode: GameMode) {
+    this.mode = mode;
+  }
+
+  public setHumanOwnerPowers(playerId: string, powers: OwnerPowers): boolean {
+    const human = this.humans.get(playerId);
+    if (!human) return false;
+    human.ownerPowers = { ...powers };
+    if (powers.autoFastMerge) {
+      for (const c of this.cells) {
+        if (c.ownerId === playerId) c.mergeTimer = 0;
+      }
+    }
+    return true;
+  }
+
+  public instantMergeHuman(playerId: string): boolean {
+    const human = this.humans.get(playerId);
+    if (!human || !human.alive) return false;
+    for (const c of this.cells) {
+      if (c.ownerId === playerId) c.mergeTimer = 0;
+    }
+    return true;
+  }
+
+  public spawnGoldenFoodRain(count = 40, aroundPlayerId?: string) {
+    const owned = aroundPlayerId ? this.cells.filter((c) => c.ownerId === aroundPlayerId) : [];
+    const hasPlayer = owned.length > 0;
+    const cx = hasPlayer ? owned.reduce((s, c) => s + c.x, 0) / owned.length : WORLD_SIZE / 2;
+    const cy = hasPlayer ? owned.reduce((s, c) => s + c.y, 0) / owned.length : WORLD_SIZE / 2;
+
+    for (let i = 0; i < count; i++) {
+      const x = hasPlayer
+        ? clamp(cx + (Math.random() - 0.5) * 1400, 40, WORLD_SIZE - 40)
+        : 40 + Math.random() * (WORLD_SIZE - 80);
+      const y = hasPlayer
+        ? clamp(cy + (Math.random() - 0.5) * 1400, 40, WORLD_SIZE - 40)
+        : 40 + Math.random() * (WORLD_SIZE - 80);
+      this.foods.push({
+        id: this.nextId('f'),
+        x,
+        y,
+        mass: 4,
+        radius: 10.5,
+        color: '#FACC15',
+        isGolden: true,
+        pulseOffset: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  public spawnExtraBots(count = 5) {
+    const safeCount = Math.max(1, Math.min(20, Math.round(count)));
+    for (let i = 0; i < safeCount; i++) {
+      this.spawnBot(true);
+    }
+  }
+
+  public resetBots() {
+    this.cells = this.cells.filter((c) => this.humans.has(c.ownerId));
+    this.botBrains.clear();
+    for (let i = 0; i < TARGET_BOT_COUNT; i++) {
+      this.spawnBot(true);
+    }
+  }
+
+  public halveHumanMass(playerId: string): number {
+    const human = this.humans.get(playerId);
+    if (!human || !human.alive) return 0;
+    const owned = this.cells.filter((c) => c.ownerId === playerId);
+    if (owned.length === 0) return 0;
+    let total = 0;
+    for (const c of owned) {
+      c.mass = Math.max(20, c.mass * 0.5);
+      c.radius = massToRadius(c.mass);
+      total += c.mass;
+    }
+    return Math.round(total);
+  }
+
+  public pullHumanToOwner(targetId: string, ownerId: string): boolean {
+    const targetCells = this.cells.filter((c) => c.ownerId === targetId);
+    const ownerCells = this.cells.filter((c) => c.ownerId === ownerId);
+    if (targetCells.length === 0 || ownerCells.length === 0) return false;
+    const anchor = ownerCells[0];
+    for (const tc of targetCells) {
+      const offsetDist = anchor.radius + tc.radius + 140;
+      const angle = Math.random() * Math.PI * 2;
+      tc.x = clamp(anchor.x + Math.cos(angle) * offsetDist, tc.radius, WORLD_SIZE - tc.radius);
+      tc.y = clamp(anchor.y + Math.sin(angle) * offsetDist, tc.radius, WORLD_SIZE - tc.radius);
+      tc.boostVx = 0;
+      tc.boostVy = 0;
+    }
+    return true;
+  }
+
   private removeHumanCells(playerId: string) {
     this.cells = this.cells.filter((c) => c.ownerId !== playerId);
   }
@@ -271,11 +380,22 @@ export class ServerArena {
     }
   }
 
+  public setHumanEjectMode(playerId: string, mode: 'off' | 'normal' | 'fast') {
+    const human = this.humans.get(playerId);
+    if (!human || !human.alive) return;
+    human.ejectMode = mode;
+    if (mode === 'off') {
+      human.ejectAccum = 0;
+    }
+  }
+
   public ejectHuman(playerId: string, burstCount = 1) {
     const human = this.humans.get(playerId);
     if (!human || !human.alive) return;
     const owned = this.cells.filter((c) => c.ownerId === playerId);
     const safeBurst = Math.max(1, Math.min(3, Math.round(burstCount)));
+    const ejectRadius = massToRadius(14);
+    const speed = safeBurst > 1 ? 900 : 760;
 
     for (let b = 0; b < safeBurst; b++) {
       for (const cell of owned) {
@@ -283,10 +403,9 @@ export class ServerArena {
         cell.mass -= 14;
         cell.radius = massToRadius(cell.mass);
         const baseAngle = Math.atan2(human.targetY - cell.y, human.targetX - cell.x);
-        const jitter = safeBurst > 1 ? (Math.random() - 0.5) * 0.14 : 0;
+        const jitter = safeBurst > 1 ? (Math.random() - 0.5) * 0.10 : 0;
         const angle = baseAngle + jitter;
         const skin = SKIN_MAP[cell.skinId] || SKIN_MAP.ocean;
-        const speed = safeBurst > 1 ? 820 : 690;
 
         this.ejected.push({
           id: this.nextId('e'),
@@ -296,12 +415,16 @@ export class ServerArena {
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
           mass: 14,
-          radius: massToRadius(14),
+          radius: ejectRadius,
           color: skin.secondary,
           stroke: skin.stroke,
           age: 0,
         });
       }
+    }
+
+    if (this.ejected.length > MAX_EJECTED_COUNT) {
+      this.ejected.splice(0, this.ejected.length - MAX_EJECTED_COUNT);
     }
   }
 
@@ -336,6 +459,17 @@ export class ServerArena {
     for (const human of this.humans.values()) {
       if (human.alive) {
         human.elapsedSeconds += dt;
+        if (human.ejectMode !== 'off') {
+          human.ejectAccum += dt;
+          const interval = human.ejectMode === 'fast' ? 0.036 : 0.055;
+          const burst = human.ejectMode === 'fast' ? 2 : 1;
+          let steps = 0;
+          while (human.ejectAccum >= interval && steps < 2) {
+            human.ejectAccum -= interval;
+            this.ejectHuman(human.id, burst);
+            steps += 1;
+          }
+        }
       }
     }
 
@@ -378,8 +512,13 @@ export class ServerArena {
     this.updateUnifiedBotBrains(dt);
 
     for (const cell of this.cells) {
+      const cellHuman = this.humans.get(cell.ownerId);
       if (cell.mergeTimer > 0) {
-        cell.mergeTimer = Math.max(0, cell.mergeTimer - dt);
+        if (cellHuman?.ownerPowers?.autoFastMerge) {
+          cell.mergeTimer = 0;
+        } else {
+          cell.mergeTimer = Math.max(0, cell.mergeTimer - dt);
+        }
       }
 
       if (cell.mass > 140) {
@@ -392,7 +531,7 @@ export class ServerArena {
       let targetY = cell.y;
       let isStopped = false;
 
-      const human = this.humans.get(cell.ownerId);
+      const human = cellHuman;
       if (human) {
         if (human.stopped) {
           const center = humanCenters.get(cell.ownerId);
@@ -418,9 +557,10 @@ export class ServerArena {
       const dy = targetY - cell.y;
       const dist = Math.hypot(dx, dy);
 
-      const isHumanCell = this.humans.has(cell.ownerId);
+      const isHumanCell = Boolean(human);
       const botAgility = isHumanCell ? 1.0 : 1.12;
-      const baseSpeed = (340 / Math.pow(cell.mass, 0.34)) * speedMult * botAgility;
+      const ownerSpeedMult = human?.ownerPowers?.speedMultiplier ?? 1;
+      const baseSpeed = (340 / Math.pow(cell.mass, 0.34)) * speedMult * botAgility * ownerSpeedMult;
       const throttle = dist < 14 ? dist / 14 : 1;
 
       if (!isStopped && dist > 1.5) {
@@ -445,24 +585,49 @@ export class ServerArena {
       cell.x += (cell.vx + cell.boostVx) * dt;
       cell.y += (cell.vy + cell.boostVy) * dt;
 
-      if (cell.x < cell.radius) {
-        cell.x = cell.radius;
-        cell.boostVx = Math.abs(cell.boostVx) * 0.4;
-      } else if (cell.x > WORLD_SIZE - cell.radius) {
-        cell.x = WORLD_SIZE - cell.radius;
-        cell.boostVx = -Math.abs(cell.boostVx) * 0.4;
-      }
-      if (cell.y < cell.radius) {
-        cell.y = cell.radius;
-        cell.boostVy = Math.abs(cell.boostVy) * 0.4;
-      } else if (cell.y > WORLD_SIZE - cell.radius) {
-        cell.y = WORLD_SIZE - cell.radius;
-        cell.boostVy = -Math.abs(cell.boostVy) * 0.4;
-      }
+      applySoftArenaBounds(cell, dt);
     }
 
     // 2. Same-owner repulsion / merging
     this.resolveSameOwnerInteractions(dt);
+
+    // 2b. Owner food magnet pull
+    for (const human of this.humans.values()) {
+      if (!human.alive || !human.ownerPowers?.foodMagnet) continue;
+      const hCells = this.cells.filter((c) => c.ownerId === human.id);
+      if (hCells.length === 0) continue;
+      const pullRadius = 320;
+      const pullStep = 340 * dt;
+      for (const f of this.foods) {
+        for (const hc of hCells) {
+          const dx = hc.x - f.x;
+          const dy = hc.y - f.y;
+          const range = hc.radius + pullRadius;
+          if (Math.abs(dx) > range || Math.abs(dy) > range) continue;
+          const d = Math.hypot(dx, dy);
+          if (d > 2 && d < range) {
+            f.x += (dx / d) * pullStep;
+            f.y += (dy / d) * pullStep;
+            break;
+          }
+        }
+      }
+      for (const e of this.ejected) {
+        if (e.age < 0.25) continue;
+        for (const hc of hCells) {
+          const dx = hc.x - e.x;
+          const dy = hc.y - e.y;
+          const range = hc.radius + pullRadius;
+          if (Math.abs(dx) > range || Math.abs(dy) > range) continue;
+          const d = Math.hypot(dx, dy);
+          if (d > 2 && d < range) {
+            e.x += (dx / d) * pullStep;
+            e.y += (dy / d) * pullStep;
+            break;
+          }
+        }
+      }
+    }
 
     // 3. Ejected mass & virus feeding
     this.updateEjectedMass(dt);
@@ -526,7 +691,7 @@ export class ServerArena {
 
     const ownerTotals = new Map<
       string,
-      { ownerId: string; name: string; mass: number; skinId: SkinId; isHuman: boolean }
+      { ownerId: string; name: string; mass: number; skinId: SkinId; skinLevel: SkinLevel; isHuman: boolean }
     >();
 
     for (const c of this.cells) {
@@ -539,6 +704,7 @@ export class ServerArena {
           name: c.name,
           mass: c.mass,
           skinId: c.skinId,
+          skinLevel: c.skinLevel ?? 1,
           isHuman: Boolean(c.isHuman),
         });
       }
@@ -551,6 +717,7 @@ export class ServerArena {
       mass: Math.round(entry.mass),
       isPlayer: entry.ownerId === playerId,
       skinId: entry.skinId,
+      skinLevel: entry.skinLevel,
       rank: idx + 1,
     }));
 
@@ -558,7 +725,7 @@ export class ServerArena {
     const playerEntry = playerIndex >= 0 ? sorted[playerIndex] : null;
     const playerCells = this.cells.filter((c) => c.ownerId === playerId);
 
-    // Center for food culling
+    // Center for food & ejected culling
     let cx = WORLD_SIZE / 2;
     let cy = WORLD_SIZE / 2;
     if (playerCells.length > 0) {
@@ -586,6 +753,17 @@ export class ServerArena {
         g: f.isGolden,
       }));
 
+    const ejected = this.ejected
+      .filter((e) => Math.abs(e.x - cx) < cullDist && Math.abs(e.y - cy) < cullDist)
+      .map((e) => ({
+        id: e.id,
+        x: Math.round(e.x),
+        y: Math.round(e.y),
+        r: Math.round(e.radius),
+        c: e.color,
+        s: e.stroke,
+      }));
+
     const leaderId = sorted[0]?.ownerId;
     const minimapDots: MinimapDot[] = [];
     for (const c of this.cells) {
@@ -610,6 +788,7 @@ export class ServerArena {
         ownerId: c.ownerId,
         name: c.name,
         skinId: c.skinId,
+        skinLevel: c.skinLevel ?? 1,
         x: Math.round(c.x * 10) / 10,
         y: Math.round(c.y * 10) / 10,
         mass: Math.round(c.mass * 10) / 10,
@@ -617,14 +796,7 @@ export class ServerArena {
         isHuman: Boolean(c.isHuman),
       })),
       foods,
-      ejected: this.ejected.map((e) => ({
-        id: e.id,
-        x: Math.round(e.x),
-        y: Math.round(e.y),
-        r: Math.round(e.radius),
-        c: e.color,
-        s: e.stroke,
-      })),
+      ejected,
       viruses: this.viruses.map((v) => ({
         id: v.id,
         x: Math.round(v.x),
@@ -788,6 +960,7 @@ export class ServerArena {
 
       const launchSpeed = Math.min(980, 650 + cell.radius * 3.8);
       const childRadius = massToRadius(halfMass);
+      const childMargin = getSoftBorderMargin(childRadius);
 
       cell.boostVx -= Math.cos(angle) * launchSpeed * 0.08;
       cell.boostVy -= Math.sin(angle) * launchSpeed * 0.08;
@@ -799,8 +972,9 @@ export class ServerArena {
         isPlayer: false,
         isHuman: cell.isHuman,
         skinId: cell.skinId,
-        x: clamp(cell.x + Math.cos(angle) * childRadius * 1.12, childRadius, WORLD_SIZE - childRadius),
-        y: clamp(cell.y + Math.sin(angle) * childRadius * 1.12, childRadius, WORLD_SIZE - childRadius),
+        skinLevel: cell.skinLevel,
+        x: clamp(cell.x + Math.cos(angle) * childRadius * 1.12, childMargin, WORLD_SIZE - childMargin),
+        y: clamp(cell.y + Math.sin(angle) * childRadius * 1.12, childMargin, WORLD_SIZE - childMargin),
         vx: cell.vx,
         vy: cell.vy,
         boostVx: Math.cos(angle) * launchSpeed,
@@ -1222,6 +1396,13 @@ export class ServerArena {
           a.y -= ny * overlap * ratioA * pushFactor;
           b.x += nx * overlap * ratioB * pushFactor;
           b.y += ny * overlap * ratioB * pushFactor;
+
+          const mA = getSoftBorderMargin(a.radius);
+          const mB = getSoftBorderMargin(b.radius);
+          a.x = clamp(a.x, mA, WORLD_SIZE - mA);
+          a.y = clamp(a.y, mA, WORLD_SIZE - mA);
+          b.x = clamp(b.x, mB, WORLD_SIZE - mB);
+          b.y = clamp(b.y, mB, WORLD_SIZE - mB);
         }
       }
     }
@@ -1257,6 +1438,7 @@ export class ServerArena {
         angle += (Math.random() - 0.5) * 0.35;
 
         const childRadius = massToRadius(halfMass);
+        const childMargin = getSoftBorderMargin(childRadius);
         const launchSpeed = Math.min(820, 480 + childRadius * 2.2);
 
         spawned.push({
@@ -1266,8 +1448,9 @@ export class ServerArena {
           isPlayer: false,
           isHuman: cell.isHuman,
           skinId: cell.skinId,
-          x: clamp(cell.x + Math.cos(angle) * childRadius * 0.95, childRadius, WORLD_SIZE - childRadius),
-          y: clamp(cell.y + Math.sin(angle) * childRadius * 0.95, childRadius, WORLD_SIZE - childRadius),
+          skinLevel: cell.skinLevel,
+          x: clamp(cell.x + Math.cos(angle) * childRadius * 0.95, childMargin, WORLD_SIZE - childMargin),
+          y: clamp(cell.y + Math.sin(angle) * childRadius * 0.95, childMargin, WORLD_SIZE - childMargin),
           vx: cell.vx,
           vy: cell.vy,
           boostVx: Math.cos(angle) * launchSpeed,
@@ -1295,18 +1478,25 @@ export class ServerArena {
 
   private updateEjectedMass(dt: number) {
     const remaining: EjectedMass[] = [];
+    const drag = Math.pow(0.04, dt);
 
     for (const e of this.ejected) {
       e.age += dt;
-      e.vx *= Math.pow(0.04, dt);
-      e.vy *= Math.pow(0.04, dt);
-      e.x = clamp(e.x + e.vx * dt, e.radius, WORLD_SIZE - e.radius);
-      e.y = clamp(e.y + e.vy * dt, e.radius, WORLD_SIZE - e.radius);
+      if (Math.abs(e.vx) > 0.5 || Math.abs(e.vy) > 0.5) {
+        e.vx *= drag;
+        e.vy *= drag;
+        e.x = clamp(e.x + e.vx * dt, e.radius, WORLD_SIZE - e.radius);
+        e.y = clamp(e.y + e.vy * dt, e.radius, WORLD_SIZE - e.radius);
+      }
 
       let consumed = false;
 
       for (const v of this.viruses) {
-        if (Math.hypot(e.x - v.x, e.y - v.y) < v.radius + e.radius * 0.5) {
+        const hitR = v.radius + e.radius * 0.5;
+        const dx = e.x - v.x;
+        const dy = e.y - v.y;
+        if (Math.abs(dx) > hitR || Math.abs(dy) > hitR) continue;
+        if (dx * dx + dy * dy < hitR * hitR) {
           v.feedCount += 1;
           v.lastFeedAngle = Math.atan2(e.vy, e.vx);
           v.mass += 6;
@@ -1332,8 +1522,11 @@ export class ServerArena {
       if (consumed) continue;
 
       for (const c of this.cells) {
-        if (c.ownerId === e.ownerId && e.age < 0.28) continue;
-        if (Math.hypot(e.x - c.x, e.y - c.y) < c.radius) {
+        if (c.ownerId === e.ownerId && e.age < 0.25) continue;
+        const dx = e.x - c.x;
+        const dy = e.y - c.y;
+        if (Math.abs(dx) > c.radius || Math.abs(dy) > c.radius) continue;
+        if (dx * dx + dy * dy < c.radius * c.radius) {
           c.mass += e.mass;
           c.radius = massToRadius(c.mass);
           consumed = true;
@@ -1341,12 +1534,16 @@ export class ServerArena {
         }
       }
 
-      if (!consumed && e.age < 45) {
+      if (!consumed && e.age < 24) {
         remaining.push(e);
       }
     }
 
-    this.ejected = remaining;
+    if (remaining.length > MAX_EJECTED_COUNT) {
+      this.ejected = remaining.slice(remaining.length - MAX_EJECTED_COUNT);
+    } else {
+      this.ejected = remaining;
+    }
   }
 
   private updateViruses(dt: number) {
@@ -1361,6 +1558,7 @@ export class ServerArena {
 
       for (const cell of this.cells) {
         if (cell.mass < 122) continue;
+        if (this.humans.get(cell.ownerId)?.ownerPowers?.virusShield) continue;
         const dist = Math.hypot(cell.x - v.x, cell.y - v.y);
         if (dist < cell.radius - v.radius * 0.2) {
           poppedViruses.add(v.id);
@@ -1382,6 +1580,7 @@ export class ServerArena {
               const angle = (k * Math.PI * 2) / maxSplits + (Math.random() - 0.5) * 0.3;
               const speed = 420 + Math.random() * 240;
               const r = massToRadius(pieceMass);
+              const fragMargin = getSoftBorderMargin(r);
               newFragments.push({
                 id: this.nextId(cell.isHuman ? 'h' : 'b'),
                 ownerId: cell.ownerId,
@@ -1389,8 +1588,9 @@ export class ServerArena {
                 isPlayer: false,
                 isHuman: cell.isHuman,
                 skinId: cell.skinId,
-                x: clamp(cell.x + Math.cos(angle) * (r * 0.9), r, WORLD_SIZE - r),
-                y: clamp(cell.y + Math.sin(angle) * (r * 0.9), r, WORLD_SIZE - r),
+                skinLevel: cell.skinLevel,
+                x: clamp(cell.x + Math.cos(angle) * (r * 0.9), fragMargin, WORLD_SIZE - fragMargin),
+                y: clamp(cell.y + Math.sin(angle) * (r * 0.9), fragMargin, WORLD_SIZE - fragMargin),
                 vx: cell.vx,
                 vy: cell.vy,
                 boostVx: Math.cos(angle) * speed,
@@ -1458,6 +1658,7 @@ export class ServerArena {
         const prey = sorted[j];
         if (deadIds.has(prey.id)) continue;
         if (eater.ownerId === prey.ownerId) continue;
+        if (this.humans.get(prey.ownerId)?.ownerPowers?.godMode) continue;
         if (eater.mass <= prey.mass * 1.22) continue;
 
         const dist = Math.hypot(eater.x - prey.x, eater.y - prey.y);
@@ -1487,5 +1688,70 @@ export class ServerArena {
     if (deadIds.size > 0) {
       this.cells = this.cells.filter((c) => !deadIds.has(c.id));
     }
+  }
+}
+
+function getSoftBorderMargin(radius: number): number {
+  return radius <= 36 ? radius : 36 + (radius - 36) * 0.44;
+}
+
+function applySoftArenaBounds(
+  cell: {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    boostVx: number;
+    boostVy: number;
+    radius: number;
+  },
+  dt: number
+) {
+  const minMargin = getSoftBorderMargin(cell.radius);
+  const maxX = WORLD_SIZE - minMargin;
+  const maxY = WORLD_SIZE - minMargin;
+
+  if (cell.radius > 36) {
+    const cushionSpan = Math.max(1, cell.radius - minMargin);
+    const frameScale = dt * 60;
+    if (cell.x < cell.radius && cell.vx + cell.boostVx < 0) {
+      const depth = clamp((cell.radius - cell.x) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vx *= damp;
+      cell.boostVx *= damp;
+    } else if (cell.x > WORLD_SIZE - cell.radius && cell.vx + cell.boostVx > 0) {
+      const depth = clamp((cell.x - (WORLD_SIZE - cell.radius)) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vx *= damp;
+      cell.boostVx *= damp;
+    }
+
+    if (cell.y < cell.radius && cell.vy + cell.boostVy < 0) {
+      const depth = clamp((cell.radius - cell.y) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vy *= damp;
+      cell.boostVy *= damp;
+    } else if (cell.y > WORLD_SIZE - cell.radius && cell.vy + cell.boostVy > 0) {
+      const depth = clamp((cell.y - (WORLD_SIZE - cell.radius)) / cushionSpan, 0, 1);
+      const damp = Math.pow(1 - 0.16 * depth, frameScale);
+      cell.vy *= damp;
+      cell.boostVy *= damp;
+    }
+  }
+
+  if (cell.x < minMargin) {
+    cell.x = minMargin;
+    if (cell.boostVx < 0) cell.boostVx *= 0.12;
+  } else if (cell.x > maxX) {
+    cell.x = maxX;
+    if (cell.boostVx > 0) cell.boostVx *= 0.12;
+  }
+
+  if (cell.y < minMargin) {
+    cell.y = minMargin;
+    if (cell.boostVy < 0) cell.boostVy *= 0.12;
+  } else if (cell.y > maxY) {
+    cell.y = maxY;
+    if (cell.boostVy > 0) cell.boostVy *= 0.12;
   }
 }

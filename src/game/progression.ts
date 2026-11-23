@@ -1,4 +1,5 @@
-import { BoostItemDefinition, MatchRewardSummary, PlayerProfile } from './types';
+import { decodeUnlockedSkinsWithLevels } from './skins';
+import { BoostItemDefinition, MatchRewardSummary, PlayerProfile, SkinId, SkinLevel } from './types';
 
 export const PROFILE_STORAGE_KEY = 'xane_profile_v1';
 
@@ -9,6 +10,7 @@ export const DEFAULT_PROFILE: PlayerProfile = {
   xp: 0,
   level: 1,
   unlockedSkins: ['kurdish_sun', 'ocean', 'emerald'],
+  skinLevels: {},
   boosts: {
     levelBoost2x: 0,
     levelBoost3x: 0,
@@ -80,15 +82,26 @@ export function loadProfile(): PlayerProfile {
     const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
     if (!raw) return DEFAULT_PROFILE;
     const parsed = JSON.parse(raw) as Partial<PlayerProfile>;
+    const decoded = decodeUnlockedSkinsWithLevels(
+      Array.isArray(parsed.unlockedSkins) ? parsed.unlockedSkins : DEFAULT_PROFILE.unlockedSkins
+    );
+    const mergedSkinLevels: Partial<Record<SkinId, SkinLevel>> = { ...decoded.skinLevels };
+    if (parsed.skinLevels && typeof parsed.skinLevels === 'object') {
+      for (const [k, v] of Object.entries(parsed.skinLevels)) {
+        if (v === 2 || v === 3) {
+          const prev = mergedSkinLevels[k as SkinId] || 1;
+          if (v > prev) mergedSkinLevels[k as SkinId] = v;
+        }
+      }
+    }
     return {
       coins: typeof parsed.coins === 'number' ? parsed.coins : DEFAULT_PROFILE.coins,
       dna: typeof parsed.dna === 'number' ? parsed.dna : DEFAULT_PROFILE.dna,
       score: typeof parsed.score === 'number' ? parsed.score : 0,
       xp: typeof parsed.xp === 'number' ? parsed.xp : 0,
       level: typeof parsed.level === 'number' && parsed.level >= 1 ? parsed.level : 1,
-      unlockedSkins: Array.isArray(parsed.unlockedSkins)
-        ? parsed.unlockedSkins
-        : DEFAULT_PROFILE.unlockedSkins,
+      unlockedSkins: decoded.unlockedSkins,
+      skinLevels: mergedSkinLevels,
       boosts: {
         levelBoost2x: parsed.boosts?.levelBoost2x ?? 0,
         levelBoost3x: parsed.boosts?.levelBoost3x ?? 0,
